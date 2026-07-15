@@ -159,29 +159,38 @@ jobs:
 
       - uses: docker/setup-buildx-action@v3
 
-      - uses: docker/login-action@v3
+      # PUBLISHING IS OPT-IN. By default this job BUILDS both images — which
+      # genuinely validates that the Dockerfiles compile — but does not PUSH them.
+      # Pushing to GitHub Container Registry needs registry write access and a
+      # place for the images to go, neither of which matters until you actually
+      # deploy. Set the repository variable PUBLISH_IMAGES=true (Settings →
+      # Secrets and variables → Actions → Variables) to turn pushing on; the
+      # login step and `push` both switch on with it. Nothing else changes.
+      - name: Log in to GHCR
+        if: vars.PUBLISH_IMAGES == 'true'
+        uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
 
-      - name: Build and push API
+      - name: Build API${{ vars.PUBLISH_IMAGES == 'true' && ' and push' || '' }}
         uses: docker/build-push-action@v6
         with:
           context: ./backend
           target: production
-          push: true
+          push: ${{ vars.PUBLISH_IMAGES == 'true' }}
           tags: |
             ${{ env.IMAGE_BASE }}/api:${{ github.sha }}
             ${{ env.IMAGE_BASE }}/api:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Build and push web
+      - name: Build web${{ vars.PUBLISH_IMAGES == 'true' && ' and push' || '' }}
         uses: docker/build-push-action@v6
         with:
           context: ./frontend
-          push: true
+          push: ${{ vars.PUBLISH_IMAGES == 'true' }}
           tags: |
             ${{ env.IMAGE_BASE }}/web:${{ github.sha }}
             ${{ env.IMAGE_BASE }}/web:${{ github.ref_name }}
@@ -193,7 +202,11 @@ jobs:
     name: Deploy to Azure App Service
     runs-on: ubuntu-latest
     needs: build
-    if: github.ref == 'refs/heads/main'
+    # Opt-in, like publishing. Without the Azure secrets and a target App
+    # Service this job can only fail, so it stays cleanly SKIPPED until you set
+    # the repository variable DEPLOY_ENABLED=true. Enable PUBLISH_IMAGES too —
+    # this job pulls the images that one pushes.
+    if: github.ref == 'refs/heads/main' && vars.DEPLOY_ENABLED == 'true'
 
     # A protected environment: this gate is where a human approval or a
     # deployment window is enforced. Auto-deploying main to production with no
