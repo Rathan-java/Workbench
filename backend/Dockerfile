@@ -19,10 +19,17 @@ RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
 
-# `npm ci` (not `install`) — reproducible builds from the lockfile, and it fails
-# loudly if package.json and the lockfile have drifted, which is exactly what you
-# want a CI build to do.
-RUN npm ci --omit=dev && npx prisma generate
+# `npm install`, not `npm ci`: this is an npm WORKSPACES monorepo, so the single
+# package-lock.json lives at the repo root and never in this per-app build
+# context. `npm ci` would fail here for want of a lockfile it will never see.
+#
+# Install everything (the Prisma CLI is a devDependency and is needed to run
+# `prisma generate`), generate the client against Alpine's musl, THEN prune the
+# dev dependencies away — so the node_modules this stage hands to production
+# carries the generated client but none of the build toolchain.
+RUN npm install --no-audit --no-fund \
+ && npx prisma generate \
+ && npm prune --omit=dev
 
 
 # --- builder (dev deps, for linting/tests in CI) ------------------------------
@@ -31,7 +38,7 @@ WORKDIR /app
 RUN apk add --no-cache openssl
 COPY package*.json ./
 COPY prisma ./prisma/
-RUN npm ci && npx prisma generate
+RUN npm install --no-audit --no-fund && npx prisma generate
 COPY . .
 RUN npm run lint
 

@@ -10,8 +10,11 @@
 FROM node:22-alpine AS build
 WORKDIR /app
 
+# `npm install`, not `npm ci`: this is an npm WORKSPACES monorepo, so the only
+# package-lock.json lives at the repo root, never in this per-app build context.
+# `npm ci` would fail here for want of a lockfile it will never see.
 COPY package*.json ./
-RUN npm ci
+RUN npm install --no-audit --no-fund
 
 COPY . .
 
