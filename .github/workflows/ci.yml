@@ -1,0 +1,227 @@
+# =============================================================================
+#  CI/CD — Ara Workbench
+#
+#  Gate order is deliberate: the cheap, fast checks run first and fail the build
+#  before we spend three minutes standing up MySQL and building images. A
+#  pipeline that runs a 6-minute Docker build before discovering a lint error is
+#  a pipeline nobody wants to wait for.
+#
+#    lint  →  test (real MySQL)  →  security audit  →  build images  →  deploy
+# =============================================================================
+
+name: CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+  workflow_dispatch:
+
+env:
+  NODE_VERSION: '22'
+
+concurrency:
+  # A new push supersedes an in-flight run on the same branch. No point burning
+  # runners on a commit that is already stale.
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ---------------------------------------------------------------------------
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Generate Prisma client
+        run: npx prisma generate
+        working-directory: backend
+
+      - name: Lint backend
+        run: npm run lint --workspace backend
+
+      - name: Lint frontend
+        run: npm run lint --workspace frontend
+
+  # ---------------------------------------------------------------------------
+  test:
+    name: Test
+    runs-on: ubuntu-latest
+    needs: lint
+
+    # A real MySQL, not an in-memory stand-in. The whole security model rests on
+    # database-level constraints — unique indexes, foreign keys, the atomic
+    # scheduler lock — and none of those are exercised by a mock.
+    services:
+      mysql:
+        image: mysql:8.4
+        env:
+          MYSQL_ROOT_PASSWORD: root
+          MYSQL_DATABASE: ara_workbench_test
+        ports:
+          - 3306:3306
+        options: >-
+          --health-cmd="mysqladmin ping -h localhost -uroot -proot"
+          --health-interval=5s
+          --health-timeout=5s
+          --health-retries=20
+
+    env:
+      NODE_ENV: test
+      DATABASE_URL: mysql://root:root@127.0.0.1:3306/ara_workbench_test
+      JWT_ACCESS_SECRET: ci-access-secret-that-is-at-least-32-characters-long
+      JWT_REFRESH_SECRET: ci-refresh-secret-that-is-at-least-32-characters-long
+      MAIL_ENABLED: 'false'
+      SCHEDULER_ENABLED: 'false'
+      SEED_ADMIN_EMAIL: admin@ci.local
+      SEED_ADMIN_PASSWORD: CiAdminPassword123!
+      LOG_LEVEL: error
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      - name: Apply migrations
+        run: npx prisma migrate deploy
+        working-directory: backend
+
+      - name: Seed
+        run: node prisma/seed.js
+        working-directory: backend
+
+      - name: Unit tests
+        run: npm run test:unit --workspace backend
+
+      - name: Integration tests
+        run: npm run test:integration --workspace backend
+
+  # ---------------------------------------------------------------------------
+  security:
+    name: Security audit
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - run: npm ci
+
+      # Fails on high/critical only. Failing on every `low` advisory in a
+      # transitive dev dependency trains the team to add --force, which defeats
+      # the point of having the gate at all.
+      - name: npm audit
+        run: npm audit --audit-level=high
+
+      - name: Check for secrets in the diff
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  # ---------------------------------------------------------------------------
+  build:
+    name: Build images
+    runs-on: ubuntu-latest
+    needs: [test, security]
+    if: github.event_name == 'push'
+
+    permissions:
+      contents: read
+      packages: write
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: docker/setup-buildx-action@v3
+
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Build and push API
+        uses: docker/build-push-action@v6
+        with:
+          context: ./backend
+          target: production
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/api:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Build and push web
+        uses: docker/build-push-action@v6
+        with:
+          context: ./frontend
+          push: true
+          tags: |
+            ghcr.io/${{ github.repository }}/web:${{ github.sha }}
+            ghcr.io/${{ github.repository }}/web:${{ github.ref_name }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+  # ---------------------------------------------------------------------------
+  deploy:
+    name: Deploy to Azure App Service
+    runs-on: ubuntu-latest
+    needs: build
+    if: github.ref == 'refs/heads/main'
+
+    # A protected environment: this gate is where a human approval or a
+    # deployment window is enforced. Auto-deploying main to production with no
+    # gate is how you find out about a bad migration from a customer.
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+
+    steps:
+      - uses: azure/login@v2
+        with:
+          creds: ${{ secrets.AZURE_CREDENTIALS }}
+
+      - name: Deploy API
+        id: deploy
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_API_APP_NAME }}
+          images: ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+
+      - name: Deploy web
+        uses: azure/webapps-deploy@v3
+        with:
+          app-name: ${{ secrets.AZURE_WEB_APP_NAME }}
+          images: ghcr.io/${{ github.repository }}/web:${{ github.sha }}
+
+      # `prisma migrate deploy` also runs in the container's CMD, but running it
+      # here too means a failing migration fails the DEPLOY step and is visible in
+      # the pipeline — rather than crash-looping silently inside App Service.
+      - name: Smoke test
+        run: |
+          for i in {1..12}; do
+            if curl -fsS "${{ secrets.AZURE_API_URL }}/readyz"; then
+              echo "✓ API is ready"; exit 0
+            fi
+            echo "waiting for the API to come up... ($i/12)"; sleep 10
+          done
+          echo "✖ API never became ready"; exit 1

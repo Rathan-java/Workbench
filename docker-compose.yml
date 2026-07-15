@@ -1,0 +1,109 @@
+# =============================================================================
+#  Ara Workbench — local development stack
+#
+#    docker compose up -d          → MySQL + MailHog (run the apps on the host)
+#    docker compose --profile full up -d --build   → everything, containerised
+#
+#  MailHog is here because the OTP password-reset flow is impossible to develop
+#  against a real SMTP server. It catches every outbound mail and serves it at
+#  http://localhost:8025 — you can watch the OTP arrive.
+# =============================================================================
+
+services:
+  mysql:
+    image: mysql:8.4
+    container_name: aw-mysql
+    restart: unless-stopped
+    environment:
+      MYSQL_ROOT_PASSWORD: root
+      MYSQL_DATABASE: ara_workbench
+      TZ: Asia/Kolkata
+    ports:
+      # Host port 3307, not 3306 — a developer machine very often already has a
+      # MySQL (or another project's container) bound to 3306, and a port clash on
+      # first `docker compose up` is a miserable first impression. The container
+      # still listens on 3306 internally, so the `api` service's DATABASE_URL is
+      # unaffected; only the host-side URL uses 3307.
+      - '3307:3306'
+    command:
+      # utf8mb4 throughout — anything less mangles names, emoji in task
+      # descriptions, and every non-Latin character an employee might type.
+      - --character-set-server=utf8mb4
+      - --collation-server=utf8mb4_unicode_ci
+      # NOTE: do NOT add --default-authentication-plugin here. It was REMOVED in
+      # MySQL 8.4 and the server refuses to start with it ("unknown variable").
+      # caching_sha2_password is the default in 8.x anyway, so the flag was only
+      # ever restating the default.
+      - --max_connections=200
+    volumes:
+      - mysql_data:/var/lib/mysql
+    healthcheck:
+      # The API's `depends_on` waits for THIS, not merely for the container to
+      # exist — otherwise Prisma connects to a MySQL that is still initialising
+      # and the first migration fails on a cold start.
+      test: ['CMD', 'mysqladmin', 'ping', '-h', 'localhost', '-uroot', '-proot']
+      interval: 5s
+      timeout: 5s
+      retries: 20
+      start_period: 30s
+
+  mailhog:
+    image: mailhog/mailhog:latest
+    container_name: aw-mailhog
+    restart: unless-stopped
+    ports:
+      - '1025:1025' # SMTP — point SMTP_HOST/SMTP_PORT here
+      - '8025:8025' # Web UI — open this to read the OTP emails
+
+  api:
+    profiles: ['full']
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+      target: production
+    container_name: aw-api
+    restart: unless-stopped
+    depends_on:
+      mysql:
+        condition: service_healthy
+    environment:
+      NODE_ENV: production
+      PORT: 4000
+      DATABASE_URL: mysql://root:root@mysql:3306/ara_workbench?connection_limit=10
+      SMTP_HOST: mailhog
+      SMTP_PORT: 1025
+      CLIENT_URL: http://localhost:8080
+      COOKIE_SECURE: 'false' # localhost has no TLS; NEVER false in real production
+      TRUST_PROXY: '1'
+    env_file:
+      - ./backend/.env
+    ports:
+      - '4000:4000'
+    volumes:
+      - uploads:/app/storage/uploads
+      - logs:/app/storage/logs
+    healthcheck:
+      test: ['CMD', 'node', '-e', "fetch('http://localhost:4000/readyz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 40s
+
+  web:
+    profiles: ['full']
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+      args:
+        VITE_API_URL: /api/v1
+    container_name: aw-web
+    restart: unless-stopped
+    depends_on:
+      - api
+    ports:
+      - '8080:80'
+
+volumes:
+  mysql_data:
+  uploads:
+  logs:

@@ -1,0 +1,838 @@
+// ============================================================================
+//  Ara Workbench — Enterprise Task Monitoring System
+//  Database: MySQL 8 (InnoDB, utf8mb4)
+//
+//  DESIGN NOTES (read before changing anything)
+//  ---------------------------------------------------------------------------
+//  1. DEPARTMENT IS DATA, NOT AN ENUM.
+//     Every scoped entity carries `departmentId`. A Tech Lead's AccessScope
+//     resolves to a single departmentId and the repository layer compiles that
+//     into a mandatory WHERE clause. Adding a 5th department is a seed row.
+//
+//  2. AN ENTRY IS A RECORD OF WORK ALREADY DONE.
+//     An employee writes an hour up AFTER living it. There is therefore no
+//     work-status column: every row is, by definition, completed work. A column
+//     that can only ever hold one value is not information — it is a field that
+//     invites people to lie to it, and a denominator that quietly inflates.
+//
+//     What an entry captures is exactly two things:
+//        description  — what was completed
+//        projectId    — what it was completed FOR
+//     …plus optional free-text remarks. Nothing else is asked, because every
+//     extra required field is a tax charged once per employee per hour per day,
+//     and it is paid in the currency of people not filling the sheet in at all.
+//
+//  3. PROJECT IS THE INDEX.
+//     projectId is REQUIRED, and it is the axis that makes an hour queryable.
+//     One entry joins an employee, a department and a body of work, so progress
+//     rolls up three ways off a single fact table — by person, by project, by
+//     department — with no extra bookkeeping. Every department is seeded with an
+//     "Internal / Non-project" project so that a required field always has an
+//     honest answer; a mandatory field with no true option is how data goes bad.
+//
+//     Departments may still define extra optional fields (TaskFieldDefinition →
+//     the `attributes` JSON), but NONE are seeded. The form is empty by default.
+//
+//  4. ONE STATUS AXIS ONLY — APPROVAL.
+//     TaskDay.status = DRAFT -> SUBMITTED -> APPROVED | REJECTED. This governs
+//     whether a timesheet may still be edited. It is a property of the DAY, not
+//     of the work, and it is the only status in the system.
+//
+//  5. DENORMALISATION IS INTENTIONAL.
+//     TaskEntry duplicates departmentId / teamId / workDate from its TaskDay.
+//     Reason: it makes the scope engine uniform (every scoped model exposes
+//     departmentId), keeps analytics single-table, and lets the 180-day
+//     retention job delete by an indexed date without a join.
+//     These columns are written ONLY by TaskService — never by hand.
+//
+//  6. HISTORY IS APPEND-ONLY.
+//     TaskEntryRevision and AuditLog are never UPDATEd or DELETEd by the app.
+// ============================================================================
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ---------------------------------------------------------------------------
+// ENUMS
+// ---------------------------------------------------------------------------
+
+enum Role {
+  MANAGEMENT
+  TECH_LEAD
+  EMPLOYEE
+}
+
+enum UserStatus {
+  ACTIVE
+  INACTIVE
+  LOCKED
+}
+
+// NOTE: there is deliberately no TaskStatus / TaskPriority enum. See design
+// note 2 — a logged hour is work already completed, so it has no work-status,
+// and an hour that has been lived cannot be re-prioritised.
+
+/// Approval state machine for a whole day's timesheet.
+/// DRAFT -> SUBMITTED -> APPROVED | REJECTED ; REJECTED -> DRAFT
+enum DayStatus {
+  DRAFT
+  SUBMITTED
+  APPROVED
+  REJECTED
+}
+
+enum RevisionAction {
+  CREATE
+  UPDATE
+  DELETE
+  APPROVE
+  REJECT
+  REOPEN
+  LEAD_EDIT
+}
+
+/// Field types the department-driven task form can render.
+enum FieldType {
+  TEXT
+  TEXTAREA
+  NUMBER
+  SELECT
+  MULTISELECT
+  DATE
+  BOOLEAN
+  DURATION_MINUTES
+  URL
+}
+
+enum AuditAction {
+  LOGIN
+  LOGIN_FAILED
+  LOGOUT
+  TOKEN_REFRESH
+  TOKEN_REUSE_DETECTED
+  PASSWORD_RESET_REQUESTED
+  PASSWORD_RESET_COMPLETED
+  PASSWORD_CHANGED
+  PASSWORD_RESET_BY_ADMIN
+  PROFILE_UPDATED
+  AVATAR_UPLOADED
+  USER_CREATED
+  USER_UPDATED
+  USER_DEACTIVATED
+  USER_REACTIVATED
+  USER_DELETED
+  ROLE_CHANGED
+  TEAM_CREATED
+  TEAM_UPDATED
+  TEAM_DELETED
+  TEAM_LEAD_ASSIGNED
+  TEAM_MEMBER_ASSIGNED
+  PROJECT_CREATED
+  PROJECT_UPDATED
+  DEPARTMENT_CREATED
+  DEPARTMENT_UPDATED
+  DEPARTMENT_DELETED
+  TASK_CREATED
+  TASK_UPDATED
+  TASK_DELETED
+  TASK_EDITED_BY_LEAD
+  TASK_DAY_SUBMITTED
+  TASK_DAY_APPROVED
+  TASK_DAY_REJECTED
+  TASK_DAY_REOPENED
+  REPORT_EXPORTED
+  SETTING_UPDATED
+  RETENTION_CLEANUP
+}
+
+enum NotificationType {
+  MISSED_HOURLY_UPDATE
+  TEAM_COMPLIANCE_ALERT
+  DAILY_SUMMARY
+  TASK_APPROVED
+  TASK_REJECTED
+  TASK_EDITED_BY_LEAD
+  ACCOUNT
+  SYSTEM
+}
+
+enum NotificationLevel {
+  INFO
+  WARNING
+  CRITICAL
+  SUCCESS
+}
+
+enum ProjectStatus {
+  ACTIVE
+  ON_HOLD
+  COMPLETED
+  ARCHIVED
+}
+
+// ---------------------------------------------------------------------------
+// ORGANISATION
+// ---------------------------------------------------------------------------
+
+/// The four operating departments. Seeded, but fully data-driven — the entire
+/// isolation model, task form, and working-hours config hang off this table.
+model Department {
+  id          String  @id @default(cuid())
+  /// Stable machine key used by seeds/config. Never change after go-live.
+  code        String  @unique @db.VarChar(48)
+  name        String  @db.VarChar(120)
+  description String? @db.VarChar(500)
+  /// Hex accent used by the UI to visually separate departments.
+  colorHex    String  @default("#2563EB") @db.VarChar(9)
+  icon        String? @db.VarChar(48)
+  isActive    Boolean @default(true)
+  sortOrder   Int     @default(0)
+
+  /// Minimum number of hourly slots an employee must fill to be "compliant".
+  /// Data, not a constant — Video Editing may legitimately differ from Tech.
+  requiredSlotsPerDay Int @default(7)
+  /// ISO weekday numbers that count as working days (1 = Mon .. 7 = Sun).
+  workingWeekdays     Json @default("[1,2,3,4,5]")
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users            User[]
+  teams            Team[]
+  projects         Project[]
+  timeSlots        TimeSlot[]
+  fieldDefinitions TaskFieldDefinition[]
+  taskDays         TaskDay[]
+  taskEntries      TaskEntry[]
+  rollups          DailyProductivityRollup[]
+  holidays         Holiday[]
+
+  @@index([isActive, sortOrder])
+  @@map("departments")
+}
+
+/// Working-hour columns of the task grid. Per-department so shifts can differ.
+model TimeSlot {
+  id           String @id @default(cuid())
+  departmentId String
+  /// Human label rendered as the grid column header, e.g. "10:00 - 11:00".
+  label        String @db.VarChar(32)
+  /// Minutes from midnight. 600 = 10:00. Enables ordering + "is it late?" maths
+  /// without ever parsing a display string.
+  startMinute  Int
+  endMinute    Int
+  sortOrder    Int
+  /// Break rows (lunch) render as a visual divider and are not required.
+  isBreak      Boolean @default(false)
+  /// An OVERTIME hour, appended by the "+" at the end of the grid.
+  /// It renders as a column and can be filled like any other, but it is EXCLUDED
+  /// from `expectedSlots` — so working late improves nobody's compliance score and,
+  /// crucially, *not* working late does not damage it. An overtime column that
+  /// counted toward the required hours would silently make overtime mandatory.
+  isOvertime   Boolean @default(false)
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  department Department  @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  entries    TaskEntry[]
+
+  @@unique([departmentId, startMinute])
+  @@index([departmentId, isActive, sortOrder])
+  @@map("time_slots")
+}
+
+/// Drives the department-specific portion of the task entry form.
+/// This is the table that makes "4 separate task entry points" a config
+/// concern instead of four hand-written screens.
+model TaskFieldDefinition {
+  id           String    @id @default(cuid())
+  departmentId String
+  /// Key inside TaskEntry.attributes. Immutable after data exists.
+  key          String    @db.VarChar(64)
+  label        String    @db.VarChar(120)
+  type         FieldType
+  isRequired   Boolean   @default(false)
+  /// For SELECT / MULTISELECT: ["Google Ads","Meta","SEO"]
+  options      Json?
+  placeholder  String?   @db.VarChar(160)
+  helpText     String?   @db.VarChar(240)
+  maxLength    Int?
+  minValue     Int?
+  maxValue     Int?
+  defaultValue Json?
+  /// Show this field as a column in list/report views.
+  showInTable  Boolean   @default(false)
+  sortOrder    Int       @default(0)
+  isActive     Boolean   @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([departmentId, key])
+  @@index([departmentId, isActive, sortOrder])
+  @@map("task_field_definitions")
+}
+
+model Team {
+  id           String  @id @default(cuid())
+  departmentId String
+  name         String  @db.VarChar(120)
+  code         String  @unique @db.VarChar(48)
+  description  String? @db.VarChar(500)
+  /// The Tech Lead. Nullable so a team can exist before a lead is appointed.
+  leadId       String?
+  isActive     Boolean @default(true)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  department Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  lead       User?                     @relation("TeamLead", fields: [leadId], references: [id], onDelete: SetNull)
+  members    User[]                    @relation("TeamMembers")
+  taskDays   TaskDay[]
+  taskEntries TaskEntry[]
+  rollups    DailyProductivityRollup[]
+
+  @@unique([departmentId, name])
+  @@index([departmentId, isActive])
+  @@index([leadId])
+  @@map("teams")
+}
+
+model User {
+  id           String     @id @default(cuid())
+  employeeCode String     @unique @db.VarChar(32)
+  email        String     @unique @db.VarChar(190)
+  passwordHash String     @db.VarChar(120)
+  firstName    String     @db.VarChar(80)
+  /// OPTIONAL. Plenty of people have a single legal name (mononyms are common
+  /// across South India and much of the world), and a required last-name field
+  /// forces them to type a dot or a repeat of their first name — which then
+  /// shows up in every report and email. A name is whatever the person says it
+  /// is; the system's job is to store it, not to insist it has two parts.
+  lastName     String?    @db.VarChar(80)
+  phone        String?    @db.VarChar(32)
+  designation  String?    @db.VarChar(120)
+  avatarPath   String?    @db.VarChar(255)
+  role         Role
+  status       UserStatus @default(ACTIVE)
+
+  /// NULL only for MANAGEMENT — management is cross-departmental by definition.
+  departmentId String?
+  teamId       String?
+
+  timezone String @default("Asia/Kolkata") @db.VarChar(64)
+  locale   String @default("en") @db.VarChar(12)
+
+  // --- credential + brute-force state -------------------------------------
+  /// Any access token issued before this instant is rejected. Bumped on
+  /// password change / admin reset / token-reuse revocation.
+  passwordChangedAt DateTime  @default(now())
+  mustChangePassword Boolean  @default(false)
+  failedLoginCount  Int       @default(0)
+  lockedUntil       DateTime?
+  lastLoginAt       DateTime?
+  lastLoginIp       String?   @db.VarChar(64)
+
+  createdById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  deactivatedAt DateTime?
+
+  department      Department?               @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  team            Team?                     @relation("TeamMembers", fields: [teamId], references: [id], onDelete: SetNull)
+  ledTeams        Team[]                    @relation("TeamLead")
+  createdBy       User?                     @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers    User[]                    @relation("UserCreatedBy")
+
+  taskDays        TaskDay[]                 @relation("TaskDayOwner")
+  reviewedDays    TaskDay[]                 @relation("TaskDayReviewer")
+  taskEntries     TaskEntry[]               @relation("EntryOwner")
+  createdEntries  TaskEntry[]               @relation("EntryCreatedBy")
+  updatedEntries  TaskEntry[]               @relation("EntryUpdatedBy")
+  revisions       TaskEntryRevision[]
+  transitions     TaskDayTransition[]
+  refreshTokens   RefreshToken[]
+  passwordOtps    PasswordResetOtp[]
+  auditLogs       AuditLog[]
+  notifications   Notification[]
+  rollups         DailyProductivityRollup[]
+  settingsChanged SystemSetting[]
+
+  @@index([departmentId, status])
+  @@index([teamId, status])
+  @@index([role, status])
+  @@index([lastName, firstName])
+  @@map("users")
+}
+
+/// The unit of work an hour is logged AGAINST, and the index that makes the
+/// whole reporting layer possible. Scoped to exactly one department: a project
+/// that spanned two departments would put one team's hours inside another
+/// team's boundary, which is precisely what the scope engine exists to prevent.
+///
+/// There is no sub-level (no "module", no epic). One level is enough to answer
+/// every question management actually asks — how is this project going, who is
+/// on it, what did they do — and each extra level is another dropdown an
+/// employee must get right at 6pm before they can go home.
+model Project {
+  id           String        @id @default(cuid())
+  departmentId String
+  code         String        @db.VarChar(48)
+  name         String        @db.VarChar(160)
+  description  String?       @db.Text
+  status       ProjectStatus @default(ACTIVE)
+  clientName   String?       @db.VarChar(160)
+  startDate    DateTime?     @db.Date
+  endDate      DateTime?     @db.Date
+
+  /// The department's "Internal / Non-project" catch-all. Exactly one per
+  /// department, created by the seed and by department creation, and refused
+  /// deletion — because projectId is NOT NULL and everyone needs a truthful
+  /// answer for the hours that genuinely belong to no project.
+  isInternal Boolean @default(false)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  department Department  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  entries    TaskEntry[]
+
+  @@unique([departmentId, code])
+  @@index([departmentId, status])
+  @@map("projects")
+}
+
+// ---------------------------------------------------------------------------
+// TASK MONITORING (the core domain)
+// ---------------------------------------------------------------------------
+
+/// One row per employee per calendar day. The aggregate root that owns the
+/// hourly entries and carries the approval state machine.
+model TaskDay {
+  id           String    @id @default(cuid())
+
+  /// NULLABLE, and SetNull on delete.
+  ///
+  /// ── THE WORK OUTLIVES THE PERSON ──────────────────────────────────────────
+  /// When an employee is deleted, their timesheets are NOT deleted with them.
+  /// The hours they logged are the COMPANY'S record of what was done — a project
+  /// that shipped, a client that was billed, an incident that cost someone an
+  /// evening. None of that stops being true because the person has left.
+  ///
+  /// A Cascade here (which is what this used to be) meant deleting one employee
+  /// silently erased months of delivery history, and every report covering that
+  /// period quietly stopped adding up. Nobody would notice for a quarter.
+  ///
+  /// So the row survives with `userId = NULL`, and `employeeName` / `employeeCode`
+  /// below preserve WHO it was, in plain text, forever.
+  userId       String?
+  /// Snapshot of the employee, stamped at delete time. This is what keeps a
+  /// timesheet attributable after its owner is gone.
+  employeeName String?   @db.VarChar(160)
+  employeeCode String?   @db.VarChar(32)
+
+  departmentId String
+  teamId       String?
+  /// DATE only — never a timestamp. Timezone is resolved at the edge.
+  workDate     DateTime  @db.Date
+  status       DayStatus @default(DRAFT)
+
+  submittedAt  DateTime?
+  reviewedById String?
+  reviewedAt   DateTime?
+  reviewNote   String?   @db.Text
+
+  /// Maintained by TaskService on every write. Lets the compliance query and
+  /// the grid header render without aggregating children.
+  filledSlots   Int @default(0)
+  expectedSlots Int @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user        User?               @relation("TaskDayOwner", fields: [userId], references: [id], onDelete: SetNull)
+  department  Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  team        Team?               @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  reviewedBy  User?               @relation("TaskDayReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  entries     TaskEntry[]
+  transitions TaskDayTransition[]
+
+  @@unique([userId, workDate])
+  @@index([departmentId, workDate])
+  @@index([teamId, workDate])
+  @@index([workDate, status])
+  @@index([status, departmentId])
+  @@map("task_days")
+}
+
+/// A single hourly cell. departmentId / teamId / workDate are denormalised
+/// copies of the parent TaskDay — see design note 4 at the top of this file.
+model TaskEntry {
+  id           String @id @default(cuid())
+  taskDayId    String
+  timeSlotId   String
+
+  /// NULLABLE + SetNull — see the note on TaskDay.userId.
+  /// The hour of work survives the employee who logged it. It is the company's
+  /// record, not their personal property.
+  userId       String?
+  employeeName String?  @db.VarChar(160)
+  employeeCode String?  @db.VarChar(32)
+
+  departmentId String
+  teamId       String?
+  workDate     DateTime @db.Date
+
+  /// WHAT WAS COMPLETED in this hour. The entire point of the row.
+  description String @db.Text
+
+  /// WHAT IT WAS COMPLETED FOR. Required — see design note 3.
+  /// This is the join that lets an hour roll up by project as well as by person
+  /// and department, which is the only reason we ask for it at all.
+  projectId String
+
+  /// Optional. Anything that did not fit in the description.
+  remarks String? @db.Text
+
+  /// Department-specific OPTIONAL fields, validated against TaskFieldDefinition.
+  /// No definitions are seeded — this is an escape hatch, not a default.
+  attributes Json?
+
+  /// Optimistic concurrency token. A client PATCH must echo the version it
+  /// read; a mismatch returns 409 instead of silently clobbering another tab.
+  version Int @default(1)
+
+  /// TRUE when saved after the slot's own hour had already elapsed — the
+  /// signal behind every "late update" metric. Computed server-side only.
+  isLate Boolean @default(false)
+
+  /// Set when a Tech Lead / Management edits an employee's entry.
+  editedByLead   Boolean @default(false)
+
+  /// NULLABLE, and SetNull on delete — see the note on User.
+  /// These record who *touched* the row. If that person is later deleted from the
+  /// company, the WORK must survive them: the entry belongs to `userId`, not to
+  /// whoever typed it. A Restrict here would make deleting any user who ever
+  /// corrected a colleague's timesheet impossible.
+  createdById String?
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  taskDay    TaskDay             @relation(fields: [taskDayId], references: [id], onDelete: Cascade)
+  timeSlot   TimeSlot            @relation(fields: [timeSlotId], references: [id], onDelete: Restrict)
+  /// The employee the work belongs to. Distinct from createdBy/updatedBy, which
+  /// record who *touched* the row — a Tech Lead correcting an entry becomes
+  /// updatedBy, but the work is still the employee's.
+  user       User?               @relation("EntryOwner", fields: [userId], references: [id], onDelete: SetNull)
+  department Department          @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  team       Team?               @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  /// Restrict, not SetNull: projectId is NOT NULL, and a project with logged
+  /// hours behind it must not be deletable out from under them. The project
+  /// service archives instead — the work keeps its index forever.
+  project    Project             @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  createdBy  User?               @relation("EntryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy  User?               @relation("EntryUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+  revisions  TaskEntryRevision[]
+
+  /// One entry per slot per day. The DB — not the app — guarantees this.
+  @@unique([taskDayId, timeSlotId])
+  @@index([departmentId, workDate])
+  @@index([teamId, workDate])
+  @@index([userId, workDate])
+  /// The project rollups. (projectId, workDate) serves "hours on project X in
+  /// range"; (projectId, userId) serves "who has worked on project X".
+  @@index([projectId, workDate])
+  @@index([projectId, userId])
+  /// Drives the 180-day retention job with an index-only scan.
+  @@index([workDate])
+  @@map("task_entries")
+}
+
+/// Append-only history. Written inside the SAME transaction as the mutation it
+/// describes, so history can never drift from the live row.
+model TaskEntryRevision {
+  id       String @id @default(cuid())
+  entryId  String
+  /// 1-based, monotonic per entry.
+  revision Int
+
+  action RevisionAction
+
+  /// Full snapshot of the entry AFTER the change.
+  snapshot      Json
+  /// { field: { from, to } } — precomputed so the UI never diffs client-side.
+  changedFields Json?
+  reason        String? @db.VarChar(500)
+
+  /// Nullable so a user can be deleted without destroying the history of what
+  /// they changed. `actorName` preserves WHO it was, in plain text, forever —
+  /// an audit trail that forgets the actor the moment they leave the company is
+  /// not an audit trail.
+  actorId      String?
+  actorName    String?  @db.VarChar(160)
+  departmentId String   @db.VarChar(32)
+  workDate     DateTime @db.Date
+  createdAt    DateTime @default(now())
+
+  entry TaskEntry @relation(fields: [entryId], references: [id], onDelete: Cascade)
+  actor User?     @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@unique([entryId, revision])
+  @@index([entryId, createdAt])
+  @@index([actorId, createdAt])
+  @@index([workDate])
+  @@map("task_entry_revisions")
+}
+
+/// Every approval-state move, with who and why. Makes the workflow auditable.
+model TaskDayTransition {
+  id        String    @id @default(cuid())
+  taskDayId String
+  from      DayStatus
+  to        DayStatus
+  actorId   String?
+  actorName String?   @db.VarChar(160)
+  note      String?   @db.Text
+  createdAt DateTime  @default(now())
+
+  taskDay TaskDay @relation(fields: [taskDayId], references: [id], onDelete: Cascade)
+  actor   User?   @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([taskDayId, createdAt])
+  @@map("task_day_transitions")
+}
+
+// ---------------------------------------------------------------------------
+// AUTHENTICATION & SECURITY
+// ---------------------------------------------------------------------------
+
+/// Rotating refresh tokens with reuse detection.
+/// Tokens are opaque 64-byte randoms; only their SHA-256 hash is stored. A
+/// replay of an already-rotated token revokes the entire `familyId`.
+model RefreshToken {
+  id        String @id @default(cuid())
+  userId    String
+  /// All descendants of one login share a family. Revoked as a unit on theft.
+  familyId  String @db.VarChar(64)
+  tokenHash String @unique @db.VarChar(64)
+
+  expiresAt DateTime
+  revokedAt DateTime?
+  /// Set when this token is rotated. Its presence + a fresh use = theft.
+  replacedByHash String? @db.VarChar(64)
+
+  ip        String? @db.VarChar(64)
+  userAgent String? @db.VarChar(255)
+
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
+  @@map("refresh_tokens")
+}
+
+/// Hashed, single-use, 5-minute, attempt-limited password reset OTP.
+model PasswordResetOtp {
+  id         String    @id @default(cuid())
+  userId     String
+  otpHash    String    @db.VarChar(120)
+  expiresAt  DateTime
+  attempts   Int       @default(0)
+  consumedAt DateTime?
+  /// Issued after successful OTP verification; exchanged for the actual reset.
+  /// Prevents "verify OTP then reset someone else's password".
+  resetTokenHash String? @unique @db.VarChar(64)
+  resetTokenExpiresAt DateTime?
+
+  ip        String?  @db.VarChar(64)
+  createdAt DateTime @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, consumedAt])
+  @@index([expiresAt])
+  @@map("password_reset_otps")
+}
+
+/// Immutable. Never UPDATEd, never DELETEd — not even by the retention job.
+model AuditLog {
+  id      String      @id @default(cuid())
+  action  AuditAction
+  actorId String?
+  /// Snapshot of the actor's role/email at the time — survives later changes.
+  actorEmail String?  @db.VarChar(190)
+  actorRole  Role?
+
+  entityType String? @db.VarChar(64)
+  entityId   String? @db.VarChar(64)
+  /// Free-form scope tag so Management can filter audit by department.
+  departmentId String? @db.VarChar(32)
+
+  summary String? @db.VarChar(500)
+  before  Json?
+  after   Json?
+
+  ip            String? @db.VarChar(64)
+  userAgent     String? @db.VarChar(255)
+  correlationId String? @db.VarChar(64)
+  success       Boolean @default(true)
+
+  createdAt DateTime @default(now())
+
+  actor User? @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([createdAt])
+  @@index([actorId, createdAt])
+  @@index([action, createdAt])
+  @@index([entityType, entityId])
+  @@index([departmentId, createdAt])
+  @@map("audit_logs")
+}
+
+// ---------------------------------------------------------------------------
+// NOTIFICATIONS, ANALYTICS, OPS
+// ---------------------------------------------------------------------------
+
+model Notification {
+  id     String            @id @default(cuid())
+  userId String
+  type   NotificationType
+  level  NotificationLevel @default(INFO)
+
+  /// De-duplication key, e.g. "overdue:2026-07-13:<slotId>:<userId>".
+  ///
+  /// The overdue check runs every hour. Without this, an employee who misses the
+  /// 10:00 slot is told about it at 12:00, 13:00, 14:00, 15:00… and their Tech
+  /// Lead is told eight times a day about the same person. A notification system
+  /// that repeats itself is a notification system everybody mutes, and then the
+  /// one alert that mattered goes unread too.
+  ///
+  /// Unique, so a second insert for the same fact is rejected by the DATABASE
+  /// rather than by an application check that races itself across instances.
+  dedupeKey String? @unique @db.VarChar(160)
+
+  title String  @db.VarChar(160)
+  body  String  @db.Text
+  /// Deep link the bell menu navigates to, e.g. "/tasks?date=2026-07-13".
+  link  String? @db.VarChar(255)
+
+  entityType String? @db.VarChar(64)
+  entityId   String? @db.VarChar(64)
+
+  readAt    DateTime?
+  emailedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, readAt, createdAt])
+  @@index([createdAt])
+  @@map("notifications")
+}
+
+/// Nightly materialised aggregate. Dashboards read from here, never from
+/// task_entries — keeps executive views sub-50ms as the fact table grows.
+model DailyProductivityRollup {
+  id           String   @id @default(cuid())
+  workDate     DateTime @db.Date
+
+  /// NULLABLE + SetNull, same reasoning as TaskDay.userId.
+  /// A deleted employee's historical productivity is still part of the
+  /// department's history. Cascading it away would make last quarter's numbers
+  /// silently shrink the day somebody left.
+  userId       String?
+  employeeName String?  @db.VarChar(160)
+
+  departmentId String
+  teamId       String?
+
+  /// The only three numbers that matter, because every filled slot is an hour of
+  /// completed work. There are no status counters here: they would all be the
+  /// same number, and six copies of filledSlots is not analytics.
+  expectedSlots Int @default(0)
+  filledSlots   Int @default(0)
+  lateSlots     Int @default(0)
+
+  /// How many DISTINCT projects this person touched that day. Cheap to compute
+  /// here, expensive to compute later, and it is the "is this person spread thin
+  /// across eight things" signal that a raw hour count cannot give you.
+  projectsTouched Int @default(0)
+
+  /// filledSlots / expectedSlots, 0..100, stored to avoid divide-by-zero in SQL.
+  complianceRate Float @default(0)
+
+  computedAt DateTime @default(now())
+
+  user       User?      @relation(fields: [userId], references: [id], onDelete: SetNull)
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  team       Team?      @relation(fields: [teamId], references: [id], onDelete: SetNull)
+
+  @@unique([userId, workDate])
+  @@index([departmentId, workDate])
+  @@index([teamId, workDate])
+  @@index([workDate])
+  @@map("daily_productivity_rollups")
+}
+
+/// Distributed lock for node-cron.
+/// Azure App Service scales out; without this, every instance fires every job —
+/// three reminder emails and three concurrent 180-day deletes.
+model SchedulerLock {
+  name        String   @id @db.VarChar(64)
+  lockedUntil DateTime
+  owner       String   @db.VarChar(64)
+  lastRunAt   DateTime?
+  lastRunOk   Boolean?
+  lastRunNote String?  @db.VarChar(500)
+
+  @@map("scheduler_locks")
+}
+
+/// Runtime-tunable configuration. Anything an admin should be able to change
+/// without a redeploy lives here; secrets and infra config stay in env vars.
+model SystemSetting {
+  key         String   @id @db.VarChar(96)
+  value       Json
+  description String?  @db.VarChar(500)
+  category    String   @default("general") @db.VarChar(48)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+
+  updatedBy User? @relation(fields: [updatedById], references: [id], onDelete: SetNull)
+
+  @@index([category])
+  @@map("system_settings")
+}
+
+/// Non-working days. Without this, the reminder job emails 300 people on a
+/// public holiday and every compliance metric shows a false 0%.
+model Holiday {
+  id   String   @id @default(cuid())
+  date DateTime @db.Date
+  name String   @db.VarChar(160)
+  /// NULL = applies to every department.
+  departmentId String?
+
+  createdAt DateTime @default(now())
+
+  department Department? @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+
+  @@unique([date, departmentId])
+  @@index([date])
+  @@map("holidays")
+}

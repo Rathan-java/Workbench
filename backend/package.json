@@ -1,0 +1,68 @@
+{
+  "name": "backend",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Ara Workbench API — Express + Prisma + MySQL",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "node --watch --env-file=.env src/server.js",
+    "start": "node src/server.js",
+    "db:generate": "prisma generate",
+    "db:migrate": "prisma migrate dev",
+    "db:deploy": "prisma migrate deploy",
+    "db:push": "prisma db push",
+    "db:seed": "node prisma/seed.js",
+    "db:studio": "prisma studio",
+    "db:reset": "prisma migrate reset --force",
+    "lint": "eslint src prisma tests",
+    "lint:fix": "eslint src prisma tests --fix",
+    "format": "prettier --write \"src/**/*.js\"",
+    "test": "npm run test:unit",
+    "test:unit": "node --env-file-if-exists=.env --test \"tests/unit/*.test.js\"",
+    "test:integration": "node --env-file-if-exists=.env --test \"tests/integration/*.test.js\"",
+    "test:all": "npm run test:unit && npm run test:integration",
+    "db:seed:demo": "node --env-file=.env prisma/seed.js",
+    "mail:setup": "node scripts/setup-mail.mjs"
+  },
+  "prisma": {
+    "seed": "node prisma/seed.js"
+  },
+  "overrides": {
+    "//": "exceljs pins an old uuid with a buffer bounds-check advisory (GHSA). It is a transitive dep we do not control and cannot reach from our code path, but shipping a known-vulnerable package fails the CI security gate — and 'we think it is unreachable' is not an argument that survives an audit. Forcing the patched major is safe: uuid's v4 API is unchanged.",
+    "uuid": "^11.1.1"
+  },
+  "dependencies": {
+    "@prisma/client": "^5.22.0",
+    "bcryptjs": "^2.4.3",
+    "compression": "^1.7.4",
+    "cookie-parser": "^1.4.7",
+    "cors": "^2.8.5",
+    "dayjs": "^1.11.13",
+    "exceljs": "^4.4.0",
+    "express": "^4.21.2",
+    "express-rate-limit": "^7.4.1",
+    "helmet": "^8.0.0",
+    "hpp": "^0.2.3",
+    "jsonwebtoken": "^9.0.2",
+    "multer": "^2.2.0",
+    "node-cron": "^4.6.0",
+    "nodemailer": "^9.0.3",
+    "pdfkit": "^0.15.1",
+    "sanitize-html": "^2.13.1",
+    "swagger-jsdoc": "^6.2.8",
+    "swagger-ui-express": "^5.0.1",
+    "winston": "^3.17.0",
+    "winston-daily-rotate-file": "^5.0.0",
+    "zod": "^3.23.8"
+  },
+  "devDependencies": {
+    "eslint": "^9.15.0",
+    "globals": "^15.12.0",
+    "prisma": "^5.22.0",
+    "supertest": "^7.0.0"
+  }
+}

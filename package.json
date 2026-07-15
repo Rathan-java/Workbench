@@ -1,0 +1,46 @@
+{
+  "name": "ara-workbench",
+  "version": "1.0.0",
+  "private": true,
+  "description": "Ara Workbench — Enterprise Task Monitoring System",
+  "type": "module",
+  "workspaces": [
+    "backend",
+    "frontend"
+  ],
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "dev": "npm-run-all --parallel dev:backend dev:frontend",
+    "dev:backend": "npm run dev --workspace backend",
+    "dev:frontend": "npm run dev --workspace frontend",
+    "build": "npm run build --workspace frontend",
+    "lint": "npm-run-all --parallel lint:*",
+    "lint:backend": "npm run lint --workspace backend",
+    "lint:frontend": "npm run lint --workspace frontend",
+    "test": "npm run test --workspace backend",
+    "db:migrate": "npm run db:migrate --workspace backend",
+    "db:seed": "npm run db:seed --workspace backend",
+    "db:studio": "npm run db:studio --workspace backend",
+    "docker:up": "docker compose up -d --build",
+    "docker:down": "docker compose down",
+    "test:e2e": "node e2e/journeys.mjs e2e/screenshots",
+    "test:api": "node backend/tests/integration/api.smoke.mjs",
+    "verify": "npm run lint && npm run test --workspace backend && npm run build",
+    "test:changes": "node e2e/changes.mjs e2e/screenshots",
+    "test:preservation": "node backend/tests/integration/data-preservation.mjs",
+    "mail:setup": "npm run mail:setup --workspace backend"
+  },
+  "devDependencies": {
+    "npm-run-all": "^4.1.5",
+    "playwright-core": "^1.61.1",
+    "prettier": "^3.3.3"
+  },
+  "overridesRationale": {
+    "uuid": "exceljs pins uuid@8, which carries GHSA-w5hq-g745-h8pq (missing buffer bounds check in v3/v5/v6 when `buf` is supplied). We never call that code path, but shipping a known-vulnerable transitive dependency fails the CI security gate — and 'we believe it is unreachable' is not an argument that survives an audit. uuid's v4 API is unchanged across this major, so forcing the patched line is safe."
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
+  }
+}
