@@ -150,6 +150,13 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Docker image names MUST be lowercase, but a GitHub owner/repo may not be
+      # (here it is "Rathan-java/Workbench"). Lowercase it once into IMAGE_BASE
+      # and build every tag from that, rather than sprinkling ${{ github.repository }}
+      # — which carried the capital letters straight into an invalid tag.
+      - name: Compute lowercase image base
+        run: echo "IMAGE_BASE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
@@ -165,8 +172,8 @@ jobs:
           target: production
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/api:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/api:${{ github.ref_name }}
+            ${{ env.IMAGE_BASE }}/api:${{ github.sha }}
+            ${{ env.IMAGE_BASE }}/api:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -176,8 +183,8 @@ jobs:
           context: ./frontend
           push: true
           tags: |
-            ghcr.io/${{ github.repository }}/web:${{ github.sha }}
-            ghcr.io/${{ github.repository }}/web:${{ github.ref_name }}
+            ${{ env.IMAGE_BASE }}/web:${{ github.sha }}
+            ${{ env.IMAGE_BASE }}/web:${{ github.ref_name }}
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
@@ -196,6 +203,11 @@ jobs:
       url: ${{ steps.deploy.outputs.webapp-url }}
 
     steps:
+      # Same lowercase rule as the build job — the image reference pulled here
+      # must match the lowercase tag that was pushed there.
+      - name: Compute lowercase image base
+        run: echo "IMAGE_BASE=ghcr.io/${GITHUB_REPOSITORY,,}" >> "$GITHUB_ENV"
+
       - uses: azure/login@v2
         with:
           creds: ${{ secrets.AZURE_CREDENTIALS }}
@@ -205,13 +217,13 @@ jobs:
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ secrets.AZURE_API_APP_NAME }}
-          images: ghcr.io/${{ github.repository }}/api:${{ github.sha }}
+          images: ${{ env.IMAGE_BASE }}/api:${{ github.sha }}
 
       - name: Deploy web
         uses: azure/webapps-deploy@v3
         with:
           app-name: ${{ secrets.AZURE_WEB_APP_NAME }}
-          images: ghcr.io/${{ github.repository }}/web:${{ github.sha }}
+          images: ${{ env.IMAGE_BASE }}/web:${{ github.sha }}
 
       # `prisma migrate deploy` also runs in the container's CMD, but running it
       # here too means a failing migration fails the DEPLOY step and is visible in
