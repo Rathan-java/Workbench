@@ -367,9 +367,12 @@ function TeamDrawer({ teamId, onClose, onEdit }) {
   });
 
   const handleRemove = async (member) => {
+    const isLead = member.id === team.leadId;
     const confirmed = await confirm({
       title: `Remove ${member.fullName} from ${team.name}?`,
-      message: 'They keep their account and their task history; they simply have no team until reassigned.',
+      message: isLead
+        ? `${member.fullName} leads this team. Removing them leaves "${team.name}" without a lead until you appoint a new one — approvals are still covered by other leads in the department, by Management, and by auto-approval. They keep their account and task history.`
+        : 'They keep their account and their task history; they simply have no team until reassigned.',
       confirmLabel: 'Remove',
       destructive: true,
     });
@@ -554,12 +557,13 @@ function TeamDrawer({ teamId, onClose, onEdit }) {
                           <ToneChip tone={ROLE_TONE[member.role]} label={ROLE[member.role] ?? member.role} />
 
                           <Guard permission={PERMISSIONS.TEAM_MANAGE}>
-                            {/* The API returns 409 CANNOT_REMOVE_LEAD here; disabling the
-                                button with an explanation beats letting them find out. */}
+                            {/* Removing the lead is allowed — it vacates the seat
+                                and the team runs leaderless until a successor is
+                                appointed, which is a normal handover state. */}
                             <Tooltip
                               title={
                                 isLead
-                                  ? 'This member leads the team. Assign a different lead before removing them.'
+                                  ? 'Remove the lead — the team will have no lead until you appoint a new one'
                                   : 'Remove from team'
                               }
                             >
@@ -567,7 +571,7 @@ function TeamDrawer({ teamId, onClose, onEdit }) {
                                 <IconButton
                                   size="small"
                                   color="error"
-                                  disabled={isLead || removeMutation.isPending}
+                                  disabled={removeMutation.isPending}
                                   onClick={() => handleRemove(member)}
                                   aria-label={`Remove ${member.fullName}`}
                                 >

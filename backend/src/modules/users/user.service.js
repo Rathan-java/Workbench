@@ -330,15 +330,23 @@ export const deactivate = async (scope, id, { reason }, actor) => {
   }
   if (before.role === ROLE.MANAGEMENT) await assertNotLastManagement(id);
 
-  const ledTeams = await prisma.team.count({ where: { leadId: id, isActive: true } });
-  if (ledTeams > 0) {
-    throw new ConflictError(
-      'This user currently leads an active team. Assign a new team lead before deactivating them.',
-      { code: 'STILL_LEADS_TEAM' },
-    );
-  }
+  // A departing lead does NOT block here. People give notice and leave before a
+  // replacement is hired — a month of limbo is normal — so refusing to deactivate
+  // them until a new lead exists would force the admin to either keep a gone
+  // employee's account live or invent a placeholder lead. Instead we VACATE the
+  // seat: the team runs leaderless until someone is appointed. That is safe now —
+  // any other lead in the department can still approve, Management always can, and
+  // an unreviewed sheet auto-approves after the configured window.
+  const ledTeams = await prisma.team.findMany({
+    where: { leadId: id, isActive: true },
+    select: { id: true, name: true },
+  });
 
   const user = await prisma.$transaction(async (tx) => {
+    if (ledTeams.length) {
+      await tx.team.updateMany({ where: { leadId: id }, data: { leadId: null } });
+    }
+
     const updated = await tx.user.update({
       where: { id },
       data: {
@@ -357,21 +365,33 @@ export const deactivate = async (scope, id, { reason }, actor) => {
       data: { revokedAt: new Date() },
     });
 
+    const vacated = ledTeams.length
+      ? ` Vacated the lead seat on: ${ledTeams.map((t) => t.name).join(', ')} — assign a new lead when appointed.`
+      : '';
+
     await audit.recordInTransaction(tx, {
       action: 'USER_DEACTIVATED',
       entityType: 'User',
       entityId: id,
       departmentId: updated.departmentId,
-      summary: `Deactivated ${updated.email}. Reason: ${reason}`,
+      summary: `Deactivated ${updated.email}. Reason: ${reason}.${vacated}`,
       before: { status: before.status },
-      after: { status: updated.status, reason },
+      after: { status: updated.status, reason, vacatedTeams: ledTeams.map((t) => t.id) },
     });
 
     return updated;
   });
 
-  logger.info('User deactivated', { userId: id, by: actor.id });
-  return toUserDto(user);
+  logger.info('User deactivated', {
+    userId: id,
+    by: actor.id,
+    vacatedTeams: ledTeams.map((t) => t.id),
+  });
+  return {
+    ...toUserDto(user),
+    // Surfaced so the UI can tell the admin which teams now need a new lead.
+    vacatedTeams: ledTeams,
+  };
 };
 
 export const reactivate = async (scope, id) => {
@@ -465,13 +485,15 @@ export const destroy = async (scope, id, actor) => {
   }
   if (target.role === ROLE.MANAGEMENT) await assertNotLastManagement(id);
 
-  const ledTeams = await prisma.team.count({ where: { leadId: id } });
-  if (ledTeams > 0) {
-    throw new ConflictError(
-      'This user leads a team. Assign a different team lead before deleting them.',
-      { code: 'STILL_LEADS_TEAM' },
-    );
-  }
+  // Leading a team no longer blocks deletion. Team.lead is onDelete: SetNull, so
+  // the lead seat simply empties when the account goes — the team runs leaderless
+  // until a new lead is appointed, which is a normal state during a handover. We
+  // still fetch the names so the audit trail records exactly which teams were left
+  // without a lead by this deletion.
+  const ledTeams = await prisma.team.findMany({
+    where: { leadId: id },
+    select: { id: true, name: true },
+  });
 
   const displayName = fullName(target);
   const preserved = target._count;
@@ -485,7 +507,7 @@ export const destroy = async (scope, id, actor) => {
       entityType: 'User',
       entityId: id,
       departmentId: target.departmentId,
-      summary: `Deleted the account for ${target.email} (${displayName}). Their ${preserved.taskEntries} task entries across ${preserved.taskDays} days were PRESERVED and remain attributed to them by name.`,
+      summary: `Deleted the account for ${target.email} (${displayName}). Their ${preserved.taskEntries} task entries across ${preserved.taskDays} days were PRESERVED and remain attributed to them by name.${ledTeams.length ? ` Left without a lead: ${ledTeams.map((t) => t.name).join(', ')}.` : ''}`,
       before: {
         email: target.email,
         fullName: displayName,
@@ -494,6 +516,7 @@ export const destroy = async (scope, id, actor) => {
         departmentId: target.departmentId,
         preservedTaskEntries: preserved.taskEntries,
         preservedTaskDays: preserved.taskDays,
+        vacatedTeams: ledTeams.map((t) => t.id),
       },
     });
 
@@ -580,7 +603,16 @@ export const previewDelete = async (scope, id) => {
     /** What is actually removed: the account, and nothing of record value. */
     willRemove: ['Their login and password', 'Their active sessions', 'Their notifications'],
 
-    blockers: target._count.ledTeams > 0 ? ['This user still leads a team'] : [],
+    // Leading a team is NOT a blocker any more — it is a heads-up. The team is
+    // left without a lead (a normal handover state), not orphaned, and the admin
+    // assigns a replacement whenever one is appointed.
+    blockers: [],
+    warnings:
+      target._count.ledTeams > 0
+        ? [
+            `This person leads ${target._count.ledTeams} ${target._count.ledTeams === 1 ? 'team' : 'teams'}. ${target._count.ledTeams === 1 ? 'It' : 'They'} will be left without a lead until you appoint a new one.`,
+          ]
+        : [],
 
     recommendation:
       entries > 0

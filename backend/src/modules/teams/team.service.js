@@ -400,22 +400,27 @@ export const removeMember = async (scope, id, userId) => {
   if (!team) throw new NotFoundError('Team');
   assertCanActOn(scope, { departmentId: team.departmentId }, { allowSelf: false });
 
-  if (team.leadId === userId) {
-    throw new ConflictError(
-      'This user is the lead of this team. Assign a different lead before removing them.',
-      { code: 'CANNOT_REMOVE_LEAD' },
-    );
-  }
+  // Removing the lead is allowed — it vacates the lead seat rather than being
+  // refused. A lead who is leaving must be removable before a successor exists;
+  // the team simply runs leaderless until one is appointed.
+  const removingTheLead = team.leadId === userId;
 
-  await prisma.user.updateMany({ where: { id: userId, teamId: id }, data: { teamId: null } });
+  await prisma.$transaction(async (tx) => {
+    if (removingTheLead) {
+      await tx.team.update({ where: { id }, data: { leadId: null } });
+    }
+    await tx.user.updateMany({ where: { id: userId, teamId: id }, data: { teamId: null } });
 
-  audit.record({
-    action: 'TEAM_MEMBER_ASSIGNED',
-    entityType: 'Team',
-    entityId: id,
-    departmentId: team.departmentId,
-    summary: `Member removed from team "${team.name}"`,
-    after: { removedUserId: userId },
+    await audit.recordInTransaction(tx, {
+      action: 'TEAM_MEMBER_ASSIGNED',
+      entityType: 'Team',
+      entityId: id,
+      departmentId: team.departmentId,
+      summary: removingTheLead
+        ? `Removed the lead from team "${team.name}" — it now has no lead. Assign a new one when appointed.`
+        : `Member removed from team "${team.name}"`,
+      after: { removedUserId: userId, vacatedLead: removingTheLead },
+    });
   });
 
   return getById(scope, id);

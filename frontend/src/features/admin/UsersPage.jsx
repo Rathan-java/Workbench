@@ -1115,6 +1115,9 @@ function DeleteUserConfirmation({ user, preview, onClose, onDeactivateInstead, o
   const { taskEntries = 0, taskDays = 0 } = preview.willPreserve ?? {};
   const blockers = preview.blockers ?? [];
   const isBlocked = blockers.length > 0;
+  // Non-blocking heads-up (e.g. "this person leads a team, which will be left
+  // without a lead"). Shown, but it does not stop the delete.
+  const warnings = preview.warnings ?? [];
   const hasWork = taskEntries > 0;
 
   const schema = useMemo(
@@ -1183,6 +1186,16 @@ function DeleteUserConfirmation({ user, preview, onClose, onDeactivateInstead, o
               <Stack component="ul" sx={{ m: 0, pl: 2.5 }}>
                 {blockers.map((blocker) => (
                   <li key={blocker}>{blocker}</li>
+                ))}
+              </Stack>
+            </Alert>
+          )}
+
+          {warnings.length > 0 && (
+            <Alert severity="warning">
+              <Stack component="ul" sx={{ m: 0, pl: 2.5 }}>
+                {warnings.map((w) => (
+                  <li key={w}>{w}</li>
                 ))}
               </Stack>
             </Alert>
