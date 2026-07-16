@@ -57,14 +57,23 @@ export const truncate = (text, max = 60, suffix = '…') => {
   return text.length <= max ? text : `${text.slice(0, Math.max(0, max - suffix.length)).trimEnd()}${suffix}`;
 };
 
-/** 'IN_PROGRESS' -> 'In Progress'. */
+/**
+ * Turn a machine identifier into readable words.
+ *   'IN_PROGRESS'  -> 'In Progress'   (enum)
+ *   'graceMinutes' -> 'Grace Minutes' (camelCase settings key)
+ *   'toLead'       -> 'To Lead'
+ *
+ * The camelCase split is why a space is inserted BEFORE lowercasing — otherwise
+ * the lowercase/uppercase boundary that marks a new word is gone before we can
+ * see it, and 'graceMinutes' collapses to the run-on 'Graceminutes'.
+ */
 export const humanizeEnum = (value) => {
   if (!value) return '';
   return String(value)
-    .toLowerCase()
+    .replace(/([a-z0-9])([A-Z])/g, '$1 $2') // camelCase -> two words
     .split(/[_\-\s]+/)
     .filter(Boolean)
-    .map((word) => word.charAt(0).toUpperCase() + word.slice(1))
+    .map((word) => word.charAt(0).toUpperCase() + word.slice(1).toLowerCase())
     .join(' ');
 };
 
