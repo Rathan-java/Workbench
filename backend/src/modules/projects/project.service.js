@@ -22,7 +22,7 @@
 import { prisma } from '../../config/prisma.js';
 import { scopedWhereWithFilters, assertCanActOn } from '../../core/accessScope.js';
 import { and, buildOrderBy, buildSearchFilter, toPrismaPage } from '../../core/pagination.js';
-import { NotFoundError, BadRequestError } from '../../core/errors.js';
+import { NotFoundError, BadRequestError, ConflictError } from '../../core/errors.js';
 import * as audit from '../audit/audit.service.js';
 
 const PROJECT_SELECT = {
@@ -214,4 +214,61 @@ export const update = async (scope, id, input) => {
   });
 
   return toDto(project);
+};
+
+/**
+ * Delete a project — but ONLY one created by mistake, with nothing behind it.
+ *
+ * The safe way to retire a project that has real work in it is to ARCHIVE it:
+ * every logged hour points at a project (projectId is NOT NULL), so a hard delete
+ * of a project with hours would either destroy that work or orphan it, and this
+ * whole system's first rule is that a record of work done never disappears.
+ *
+ * So this refuses in exactly two cases, and allows the rest:
+ *   · the "Internal / Non-project" catch-all — it is structural, not a project
+ *     someone created, and the department cannot function without it;
+ *   · any project with even one logged hour — pointed firmly at Archive instead.
+ *
+ * What is left is the genuine case this exists for: a typo, a duplicate, a
+ * project made in the wrong department and never used. That can simply go.
+ */
+export const destroy = async (scope, id) => {
+  const project = await prisma.project.findUnique({
+    where: { id },
+    select: { id: true, name: true, code: true, departmentId: true, isInternal: true },
+  });
+  if (!project) throw new NotFoundError('Project');
+  assertCanActOn(scope, { departmentId: project.departmentId }, { allowSelf: false });
+
+  if (project.isInternal) {
+    throw new ConflictError(
+      'The "Internal / Non-project" project cannot be deleted — every department needs it as the home for non-project hours.',
+      { code: 'INTERNAL_PROJECT_UNDELETABLE' },
+    );
+  }
+
+  const loggedHours = await prisma.taskEntry.count({ where: { projectId: id } });
+  if (loggedHours > 0) {
+    throw new ConflictError(
+      `"${project.name}" has ${loggedHours} logged ${loggedHours === 1 ? 'hour' : 'hours'} behind it. Deleting it would erase that work. Archive it instead — it leaves the task-entry picker and every hour is preserved.`,
+      { code: 'PROJECT_HAS_WORK', details: { loggedHours } },
+    );
+  }
+
+  await prisma.$transaction(async (tx) => {
+    // Audit FIRST, inside the transaction — a crash between delete and audit
+    // must never leave a project gone with no trace it existed.
+    await audit.recordInTransaction(tx, {
+      action: 'PROJECT_DELETED',
+      entityType: 'Project',
+      entityId: id,
+      departmentId: project.departmentId,
+      summary: `Deleted project "${project.name}" (${project.code}). It had no logged work.`,
+      before: { code: project.code, name: project.name, departmentId: project.departmentId },
+    });
+
+    await tx.project.delete({ where: { id } });
+  });
+
+  return { id, deleted: true };
 };

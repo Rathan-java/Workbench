@@ -114,14 +114,14 @@ export const projects = {
   options: (params) => get('/projects/options', params),
   get: (id) => client.get(`/projects/${id}`),
   create: (body) => client.post('/projects', body),
-  /**
-   * There is no delete: a project is retired with `status: 'ARCHIVED'`, which
-   * keeps every hour ever logged against it. On the department's `isInternal`
-   * project the API ignores `code` and rejects any status but ACTIVE
-   * (400 INTERNAL_PROJECT_MUST_STAY_ACTIVE) — a required picker entry that can be
-   * archived is a required picker entry that can be deleted.
-   */
   update: (id, body) => client.patch(`/projects/${id}`, body),
+  /**
+   * Delete a project — but ONLY a mistaken one with no logged hours. A project
+   * with work behind it is refused (409 PROJECT_HAS_WORK) and must be ARCHIVED
+   * instead, which keeps every hour. The Internal / Non-project catch-all can
+   * never be deleted (409 INTERNAL_PROJECT_UNDELETABLE).
+   */
+  remove: (id) => client.delete(`/projects/${id}`),
 };
 
 export const tasks = {

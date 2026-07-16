@@ -148,6 +148,27 @@ router
         message: 'Project updated',
       }),
     ),
+  )
+  /**
+   * @openapi
+   * /projects/{id}:
+   *   delete:
+   *     tags: [Projects]
+   *     summary: Delete an empty, mistakenly-created project
+   *     description: |
+   *       Only removes a project with NO logged hours. A project with work behind
+   *       it is refused (409) and must be ARCHIVED instead, which preserves every
+   *       hour. The Internal / Non-project catch-all can never be deleted.
+   *     responses:
+   *       200: { description: Deleted }
+   *       409: { description: Project has logged work, or is the Internal project }
+   */
+  .delete(
+    authorize(PERMISSIONS.PROJECT_MANAGE),
+    validate({ params: idParam }),
+    asyncHandler(async (req, res) =>
+      ok(res, await service.destroy(req.scope, req.params.id), { message: 'Project deleted' }),
+    ),
   );
 
 export default router;

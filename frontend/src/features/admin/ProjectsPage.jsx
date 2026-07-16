@@ -26,6 +26,8 @@ import Typography from '@mui/material/Typography';
 import AddIcon from '@mui/icons-material/AddRounded';
 import CloseIcon from '@mui/icons-material/CloseRounded';
 import EditIcon from '@mui/icons-material/EditOutlined';
+import DeleteIcon from '@mui/icons-material/DeleteOutlineRounded';
+import { useConfirm } from '../../components/common/ConfirmDialog.jsx';
 
 import DataTable from '../../components/common/DataTable.jsx';
 import PageHeader from '../../components/common/PageHeader.jsx';
@@ -379,12 +381,42 @@ export default function ProjectsPage() {
  * ------------------------------------------------------------------ */
 
 function ProjectDrawer({ projectId, onClose, onEdit }) {
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const confirm = useConfirm();
+
   const projectQuery = useQuery({
     queryKey: ['project', projectId],
     queryFn: () => projectsApi.get(projectId).then((res) => res.data),
   });
 
   const project = projectQuery.data;
+  const loggedHours = project?.entryCount ?? 0;
+  // Deletable only if it is a real, empty, non-built-in project. Anything with
+  // logged hours is archived instead (the server enforces this too); the button
+  // is disabled with an explanation rather than failing on click.
+  const canDelete = project && !project.isInternal && loggedHours === 0;
+
+  const deleteMutation = useMutation({
+    mutationFn: () => projectsApi.remove(project.id),
+    onSuccess: () => {
+      enqueueSnackbar(`Project "${project.name}" deleted`, { variant: 'success' });
+      queryClient.invalidateQueries({ queryKey: ['projects'] });
+      onClose();
+    },
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const handleDelete = async () => {
+    const confirmed = await confirm({
+      title: `Delete "${project.name}"?`,
+      message:
+        'This project has no logged hours, so it can be removed entirely. This cannot be undone.',
+      confirmLabel: 'Delete',
+      destructive: true,
+    });
+    if (confirmed) deleteMutation.mutate();
+  };
 
   return (
     <Drawer
@@ -416,6 +448,29 @@ function ProjectDrawer({ projectId, onClose, onEdit }) {
                     <EditIcon fontSize="small" />
                   </IconButton>
                 </Tooltip>
+
+                {!project.isInternal && (
+                  <Tooltip
+                    title={
+                      canDelete
+                        ? 'Delete this project'
+                        : 'This project has logged hours — archive it instead (edit → status Archived)'
+                    }
+                  >
+                    {/* span so the tooltip still shows while the button is disabled */}
+                    <span>
+                      <IconButton
+                        size="small"
+                        color="error"
+                        disabled={!canDelete || deleteMutation.isPending}
+                        onClick={handleDelete}
+                        aria-label="Delete project"
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                )}
               </Guard>
             )}
             <IconButton size="small" onClick={onClose} aria-label="Close">
