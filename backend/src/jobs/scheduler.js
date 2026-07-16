@@ -13,6 +13,7 @@ import { env } from '../config/env.js';
 import { logger } from '../config/logger.js';
 import { runRetentionCleanup } from './retentionCleanup.job.js';
 import { runRollup } from './rollup.job.js';
+import { runAutoApproval } from './autoApproval.job.js';
 import {
   runHourlyReminders,
   runLeadDigest,
@@ -61,6 +62,14 @@ const JOBS = [
     schedule: () => '15 9 * * 1-5',
     run: runUnsubmittedCheck,
     description: 'Nudge employees whose previous sheet is still in draft',
+  },
+  {
+    name: 'auto-approval',
+    // Every hour at :40 — a sheet that crosses the window is approved within the
+    // hour. Off-cadence from the other hourly jobs so they do not all fire at once.
+    schedule: () => env.CRON_AUTO_APPROVE,
+    run: runAutoApproval,
+    description: 'Approve submitted sheets left unreviewed past the auto-approve window',
   },
 ];
 

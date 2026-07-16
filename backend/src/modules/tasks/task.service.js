@@ -911,6 +911,90 @@ export const reviewDay = async (scope, user, dayId, { decision, note }) => {
   return toDayDto(updated);
 };
 
+/**
+ * AUTO-APPROVE sheets nobody reviewed in time.
+ *
+ * A submitted sheet is a record waiting on someone else's action, and an
+ * employee should not be penalised — a frozen, un-official day, blocked from
+ * editing — because their Tech Lead was on leave, swamped, or simply forgot.
+ * After the configured window (a full day by default) the sheet becomes the
+ * employee's honest record and is approved on the system's authority.
+ *
+ * It is NOT a rubber stamp that hides anything:
+ *   · every auto-approval is written to the audit log and the day's transition
+ *     history, distinctly marked as automatic (actor = system, a plain-language
+ *     note), so it is obvious which sheets a human actually looked at;
+ *   · APPROVED is not terminal — a lead who catches a problem later can still
+ *     reopen the day and correct it.
+ *
+ * Called by the scheduler. Returns a short summary string for the job log.
+ *
+ * @param {number} hours  the window; a sheet submitted longer ago than this,
+ *                        still unreviewed, is approved.
+ */
+export const autoApproveStaleDays = async (hours) => {
+  const cutoff = dayjs.utc().subtract(hours, 'hour').toDate();
+
+  const stale = await prisma.taskDay.findMany({
+    where: {
+      status: DAY_STATUS.SUBMITTED,
+      submittedAt: { lte: cutoff, not: null },
+    },
+    include: {
+      user: { select: { id: true, firstName: true, lastName: true } },
+    },
+    // Bounded so one run can never hold a giant transaction; the next run picks
+    // up the rest. In steady state there are only ever a handful.
+    take: 500,
+  });
+
+  if (!stale.length) return 'Auto-approve: nothing waiting past the window';
+
+  const note = `Auto-approved: no review within ${hours} hours of submission.`;
+  let approved = 0;
+
+  for (const day of stale) {
+    try {
+      await prisma.$transaction(async (tx) => {
+        // actorId: null — this was the system, not a person. reviewedById is
+        // nullable and SetNull, so the day records an automatic review honestly
+        // rather than crediting it to whoever happened to run the job.
+        await transition(tx, { day, to: DAY_STATUS.APPROVED, actorId: null, note });
+
+        await audit.recordInTransaction(tx, {
+          action: 'TASK_DAY_APPROVED',
+          entityType: 'TaskDay',
+          entityId: day.id,
+          departmentId: day.departmentId,
+          summary: `Auto-approved ${fullName(day.user)}'s sheet for ${formatWorkDate(day.workDate)} — unreviewed for over ${hours}h.`,
+          before: { status: day.status },
+          after: { status: DAY_STATUS.APPROVED, auto: true },
+        });
+      });
+
+      approved += 1;
+
+      if (day.userId) {
+        void notify({
+          userId: day.userId,
+          type: 'TASK_APPROVED',
+          level: 'SUCCESS',
+          title: 'Task sheet auto-approved',
+          body: `Your sheet for ${formatWorkDate(day.workDate)} was automatically approved after ${hours}h without review.`,
+          link: `/tasks?date=${formatWorkDate(day.workDate)}`,
+          entityType: 'TaskDay',
+          entityId: day.id,
+        }).catch(() => {});
+      }
+    } catch (error) {
+      // One bad row must not abort the whole batch — log it and continue.
+      logger.warn('Auto-approve failed for a sheet', { dayId: day.id, error: error.message });
+    }
+  }
+
+  return `Auto-approved ${approved} sheet(s) unreviewed for over ${hours}h`;
+};
+
 // ---------------------------------------------------------------------------
 // Monitoring / search
 // ---------------------------------------------------------------------------

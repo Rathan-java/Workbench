@@ -116,6 +116,7 @@ const schema = z.object({
   CRON_HOURLY_REMINDER: z.string().default('50 * * * *'), // :50 every hour
   CRON_LEAD_DIGEST: z.string().default('30 13,18 * * 1-5'),
   CRON_MANAGEMENT_SUMMARY: z.string().default('0 19 * * 1-5'),
+  CRON_AUTO_APPROVE: z.string().default('40 * * * *'), // :40 every hour
 
   // --- seed ----------------------------------------------------------------
   SEED_ADMIN_EMAIL: z.string().email().default('admin@ara-workbench.local'),

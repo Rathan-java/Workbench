@@ -105,6 +105,9 @@ export const SETTING_KEY = Object.freeze({
   AUTOSAVE_DEBOUNCE_MS: 'tasks.autosave.debounceMs',
   ALLOW_BACKDATED_EDIT_DAYS: 'tasks.allowBackdatedEditDays',
   REQUIRE_DAILY_SUBMISSION: 'tasks.requireDailySubmission',
+  /** A submitted sheet nobody reviews auto-approves after this many hours. */
+  AUTO_APPROVE_ENABLED: 'tasks.autoApprove.enabled',
+  AUTO_APPROVE_HOURS: 'tasks.autoApprove.hours',
 });
 
 /** The grace period, in minutes. Overridable in Settings; this is the fallback. */

@@ -84,6 +84,22 @@ const DEFAULTS = Object.freeze({
     category: 'tasks',
     description: 'Require employees to submit their sheet for approval at the end of each day.',
   },
+  [SETTING_KEY.AUTO_APPROVE_ENABLED]: {
+    value: true,
+    category: 'tasks',
+    description:
+      'Automatically approve a submitted task sheet that no Tech Lead has reviewed within the auto-approve window. Prevents an employee’s record being held hostage to a busy or absent lead.',
+  },
+  [SETTING_KEY.AUTO_APPROVE_HOURS]: {
+    // A full working day. A lead has ample time to review; past it, the sheet is
+    // the employee's honest record and should not stay frozen because nobody got
+    // to it. Auto-approval is clearly marked in the audit trail, so a lead can
+    // still reopen and correct it afterwards.
+    value: 24,
+    category: 'tasks',
+    description:
+      'Hours a submitted sheet waits for review before it auto-approves. The clock starts at submission and resets if the sheet is sent back and resubmitted.',
+  },
 });
 
 const cache = new Map();
