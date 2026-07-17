@@ -97,6 +97,31 @@ enum RevisionAction {
   LEAD_EDIT
 }
 
+/// Delivery lifecycle of an ASSIGNED task. This is deliberately NOT on TaskEntry
+/// (design note 2 — a logged hour has no work-status). It is the state of a unit
+/// of *intended* work a lead handed to an employee, and it is a genuine state
+/// machine, exactly like DayStatus is for a timesheet's approval.
+///
+/// ASSIGNED -> IN_PROGRESS -> SUBMITTED -> DONE ; SUBMITTED/DONE -> IN_PROGRESS
+/// (reopen) ; anything open -> CANCELLED ; CANCELLED -> ASSIGNED (restore).
+enum AssignmentStatus {
+  ASSIGNED
+  IN_PROGRESS
+  SUBMITTED
+  DONE
+  CANCELLED
+}
+
+/// Priority is legitimate HERE (unlike on an entry, design note 2) because an
+/// assignment is forward-looking work that genuinely can be ranked — an hour
+/// already lived cannot.
+enum AssignmentPriority {
+  LOW
+  NORMAL
+  HIGH
+  URGENT
+}
+
 /// Field types the department-driven task form can render.
 enum FieldType {
   TEXT
@@ -147,6 +172,12 @@ enum AuditAction {
   TASK_DAY_APPROVED
   TASK_DAY_REJECTED
   TASK_DAY_REOPENED
+  ASSIGNMENT_CREATED
+  ASSIGNMENT_UPDATED
+  ASSIGNMENT_SUBMITTED
+  ASSIGNMENT_COMPLETED
+  ASSIGNMENT_REOPENED
+  ASSIGNMENT_CANCELLED
   REPORT_EXPORTED
   SETTING_UPDATED
   RETENTION_CLEANUP
@@ -159,6 +190,13 @@ enum NotificationType {
   TASK_APPROVED
   TASK_REJECTED
   TASK_EDITED_BY_LEAD
+  // --- assignment lifecycle ---
+  TASK_ASSIGNED
+  ASSIGNMENT_DUE_SOON
+  ASSIGNMENT_OVERDUE
+  ASSIGNMENT_SUBMITTED
+  ASSIGNMENT_COMPLETED
+  ASSIGNMENT_REOPENED
   ACCOUNT
   SYSTEM
 }
@@ -197,7 +235,7 @@ model Department {
 
   /// Minimum number of hourly slots an employee must fill to be "compliant".
   /// Data, not a constant — Video Editing may legitimately differ from Tech.
-  requiredSlotsPerDay Int @default(7)
+  requiredSlotsPerDay Int  @default(7)
   /// ISO weekday numbers that count as working days (1 = Mon .. 7 = Sun).
   workingWeekdays     Json @default("[1,2,3,4,5]")
 
@@ -211,6 +249,7 @@ model Department {
   fieldDefinitions TaskFieldDefinition[]
   taskDays         TaskDay[]
   taskEntries      TaskEntry[]
+  assignments      Assignment[]
   rollups          DailyProductivityRollup[]
   holidays         Holiday[]
 
@@ -220,10 +259,10 @@ model Department {
 
 /// Working-hour columns of the task grid. Per-department so shifts can differ.
 model TimeSlot {
-  id           String @id @default(cuid())
+  id           String  @id @default(cuid())
   departmentId String
   /// Human label rendered as the grid column header, e.g. "10:00 - 11:00".
-  label        String @db.VarChar(32)
+  label        String  @db.VarChar(32)
   /// Minutes from midnight. 600 = 10:00. Enables ordering + "is it late?" maths
   /// without ever parsing a display string.
   startMinute  Int
@@ -297,12 +336,13 @@ model Team {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  department Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  lead       User?                     @relation("TeamLead", fields: [leadId], references: [id], onDelete: SetNull)
-  members    User[]                    @relation("TeamMembers")
-  taskDays   TaskDay[]
+  department  Department                @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  lead        User?                     @relation("TeamLead", fields: [leadId], references: [id], onDelete: SetNull)
+  members     User[]                    @relation("TeamMembers")
+  taskDays    TaskDay[]
   taskEntries TaskEntry[]
-  rollups    DailyProductivityRollup[]
+  assignments Assignment[]
+  rollups     DailyProductivityRollup[]
 
   @@unique([departmentId, name])
   @@index([departmentId, isActive])
@@ -338,37 +378,44 @@ model User {
   // --- credential + brute-force state -------------------------------------
   /// Any access token issued before this instant is rejected. Bumped on
   /// password change / admin reset / token-reuse revocation.
-  passwordChangedAt DateTime  @default(now())
-  mustChangePassword Boolean  @default(false)
-  failedLoginCount  Int       @default(0)
-  lockedUntil       DateTime?
-  lastLoginAt       DateTime?
-  lastLoginIp       String?   @db.VarChar(64)
+  passwordChangedAt  DateTime  @default(now())
+  mustChangePassword Boolean   @default(false)
+  failedLoginCount   Int       @default(0)
+  lockedUntil        DateTime?
+  lastLoginAt        DateTime?
+  lastLoginIp        String?   @db.VarChar(64)
 
-  createdById String?
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdById   String?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
   deactivatedAt DateTime?
 
-  department      Department?               @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  team            Team?                     @relation("TeamMembers", fields: [teamId], references: [id], onDelete: SetNull)
-  ledTeams        Team[]                    @relation("TeamLead")
-  createdBy       User?                     @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
-  createdUsers    User[]                    @relation("UserCreatedBy")
+  department   Department? @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  team         Team?       @relation("TeamMembers", fields: [teamId], references: [id], onDelete: SetNull)
+  ledTeams     Team[]      @relation("TeamLead")
+  createdBy    User?       @relation("UserCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  createdUsers User[]      @relation("UserCreatedBy")
 
-  taskDays        TaskDay[]                 @relation("TaskDayOwner")
-  reviewedDays    TaskDay[]                 @relation("TaskDayReviewer")
-  taskEntries     TaskEntry[]               @relation("EntryOwner")
-  createdEntries  TaskEntry[]               @relation("EntryCreatedBy")
-  updatedEntries  TaskEntry[]               @relation("EntryUpdatedBy")
-  revisions       TaskEntryRevision[]
-  transitions     TaskDayTransition[]
-  refreshTokens   RefreshToken[]
-  passwordOtps    PasswordResetOtp[]
-  auditLogs       AuditLog[]
-  notifications   Notification[]
-  rollups         DailyProductivityRollup[]
-  settingsChanged SystemSetting[]
+  taskDays       TaskDay[]           @relation("TaskDayOwner")
+  reviewedDays   TaskDay[]           @relation("TaskDayReviewer")
+  taskEntries    TaskEntry[]         @relation("EntryOwner")
+  createdEntries TaskEntry[]         @relation("EntryCreatedBy")
+  updatedEntries TaskEntry[]         @relation("EntryUpdatedBy")
+  revisions      TaskEntryRevision[]
+  transitions    TaskDayTransition[]
+
+  assignedToMe          Assignment[]              @relation("AssignmentAssignee")
+  assignmentsIMade      Assignment[]              @relation("AssignmentAssignedBy")
+  reviewedAssignments   Assignment[]              @relation("AssignmentReviewer")
+  createdAssignments    Assignment[]              @relation("AssignmentCreatedBy")
+  updatedAssignments    Assignment[]              @relation("AssignmentUpdatedBy")
+  assignmentTransitions AssignmentTransition[]
+  refreshTokens         RefreshToken[]
+  passwordOtps          PasswordResetOtp[]
+  auditLogs             AuditLog[]
+  notifications         Notification[]
+  rollups               DailyProductivityRollup[]
+  settingsChanged       SystemSetting[]
 
   @@index([departmentId, status])
   @@index([teamId, status])
@@ -406,8 +453,9 @@ model Project {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  department Department  @relation(fields: [departmentId], references: [id], onDelete: Restrict)
-  entries    TaskEntry[]
+  department  Department   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  entries     TaskEntry[]
+  assignments Assignment[]
 
   @@unique([departmentId, code])
   @@index([departmentId, status])
@@ -421,7 +469,7 @@ model Project {
 /// One row per employee per calendar day. The aggregate root that owns the
 /// hourly entries and carries the approval state machine.
 model TaskDay {
-  id           String    @id @default(cuid())
+  id String @id @default(cuid())
 
   /// NULLABLE, and SetNull on delete.
   ///
@@ -440,8 +488,8 @@ model TaskDay {
   userId       String?
   /// Snapshot of the employee, stamped at delete time. This is what keeps a
   /// timesheet attributable after its owner is gone.
-  employeeName String?   @db.VarChar(160)
-  employeeCode String?   @db.VarChar(32)
+  employeeName String? @db.VarChar(160)
+  employeeCode String? @db.VarChar(32)
 
   departmentId String
   teamId       String?
@@ -480,16 +528,16 @@ model TaskDay {
 /// A single hourly cell. departmentId / teamId / workDate are denormalised
 /// copies of the parent TaskDay — see design note 4 at the top of this file.
 model TaskEntry {
-  id           String @id @default(cuid())
-  taskDayId    String
-  timeSlotId   String
+  id         String @id @default(cuid())
+  taskDayId  String
+  timeSlotId String
 
   /// NULLABLE + SetNull — see the note on TaskDay.userId.
   /// The hour of work survives the employee who logged it. It is the company's
   /// record, not their personal property.
   userId       String?
-  employeeName String?  @db.VarChar(160)
-  employeeCode String?  @db.VarChar(32)
+  employeeName String? @db.VarChar(160)
+  employeeCode String? @db.VarChar(32)
 
   departmentId String
   teamId       String?
@@ -502,6 +550,14 @@ model TaskEntry {
   /// This is the join that lets an hour roll up by project as well as by person
   /// and department, which is the only reason we ask for it at all.
   projectId String
+
+  /// THE PATH LINK. The assigned task this hour advanced, if any.
+  /// NULL = "Other work" — ad-hoc, unassigned effort, which is always allowed.
+  /// The API requires this ONLY when the employee has an open assignment for the
+  /// day (see task.service) — that is the "required only if assigned" rule.
+  /// SetNull on delete: the hour of completed work must survive its assignment
+  /// being cancelled, exactly as it survives the person who logged it.
+  assignmentId String?
 
   /// Optional. Anything that did not fit in the description.
   remarks String? @db.Text
@@ -519,7 +575,7 @@ model TaskEntry {
   isLate Boolean @default(false)
 
   /// Set when a Tech Lead / Management edits an employee's entry.
-  editedByLead   Boolean @default(false)
+  editedByLead Boolean @default(false)
 
   /// NULLABLE, and SetNull on delete — see the note on User.
   /// These record who *touched* the row. If that person is later deleted from the
@@ -543,6 +599,9 @@ model TaskEntry {
   /// hours behind it must not be deletable out from under them. The project
   /// service archives instead — the work keeps its index forever.
   project    Project             @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  /// SetNull, not Restrict: cancelling an assignment must never be blocked by,
+  /// or destroy, the hours already logged against it — they are completed work.
+  assignment Assignment?         @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
   createdBy  User?               @relation("EntryCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
   updatedBy  User?               @relation("EntryUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
   revisions  TaskEntryRevision[]
@@ -556,6 +615,8 @@ model TaskEntry {
   /// range"; (projectId, userId) serves "who has worked on project X".
   @@index([projectId, workDate])
   @@index([projectId, userId])
+  /// The assignment progress thread: "every hour logged against assignment X".
+  @@index([assignmentId, workDate])
   /// Drives the 180-day retention job with an index-only scan.
   @@index([workDate])
   @@map("task_entries")
@@ -616,6 +677,128 @@ model TaskDayTransition {
 }
 
 // ---------------------------------------------------------------------------
+// ASSIGNMENTS (forward-looking work) — the counterpart to TaskEntry
+// ---------------------------------------------------------------------------
+//
+// An Assignment is a unit of INTENDED work a Tech Lead / Manager hands to an
+// employee. It is the exact mirror image of a TaskEntry, which is a unit of
+// COMPLETED work: an entry looks backwards ("what did this hour do"), an
+// assignment looks forwards ("what should get done, by whom, by when").
+//
+// THE "PATH" BETWEEN THE TWO is TaskEntry.assignmentId: the hourly entries an
+// employee already writes become the running progress log of the assignment.
+// The employee never types a per-hour status (that field does not exist and
+// never will — design note 2). Completion is a two-party handshake carried by
+// `status`, and effort is derived from the linked hours. Scope is free: this
+// model carries departmentId, so the isolation engine guards it like everything
+// else, with no new if-checks.
+//
+// The nullable userId / *Name / *Code snapshot columns follow the same rule as
+// TaskDay and TaskEntry: the record of work assigned outlives the person, so a
+// deleted user SetNulls the FK while the plain-text snapshot preserves who it
+// was, forever.
+
+/// A unit of assigned work. Owns nothing structural about the timesheet — it
+/// only gives the hours logged against it a shared parent and a delivery state.
+model Assignment {
+  id String @id @default(cuid())
+
+  departmentId String
+  teamId       String?
+  /// Every assignment belongs to a project — the same index every hour hangs
+  /// off. Picking the assignment in the grid can therefore auto-fill projectId.
+  projectId    String
+
+  /// The employee the work is assigned TO. Nullable + SetNull — the assignment
+  /// (and the hours logged against it) survives the assignee being deleted.
+  assigneeId   String?
+  assigneeName String? @db.VarChar(160)
+  assigneeCode String? @db.VarChar(32)
+
+  /// Who assigned it (a lead or management). Snapshot kept for the same reason.
+  assignedById   String?
+  assignedByName String? @db.VarChar(160)
+
+  title       String  @db.VarChar(200)
+  description String? @db.Text
+
+  status   AssignmentStatus   @default(ASSIGNED)
+  priority AssignmentPriority @default(NORMAL)
+
+  /// OPTIONAL. Not everything has a deadline; a mandatory date with no honest
+  /// answer is the trap this codebase avoids everywhere. DATE only — the shift's
+  /// end resolves the "is it overdue" question, not a timestamp.
+  dueDate DateTime? @db.Date
+
+  /// OPTIONAL planned effort in hours. When present it is the ONLY defensible
+  /// basis for a "% complete" (hours logged / estimate). Absent, the UI shows
+  /// effort and never a guessed percentage — the same refusal the project
+  /// dashboard makes.
+  estimatedHours Int?
+
+  submittedAt  DateTime?
+  reviewedById String?
+  reviewedAt   DateTime?
+  reviewNote   String?   @db.Text
+  completedAt  DateTime?
+
+  /// Optimistic concurrency — same contract as TaskEntry.version. A lead editing
+  /// an assignment in one tab does not silently clobber the employee submitting
+  /// it in another.
+  version Int @default(1)
+
+  // --- AI seams (dormant: nothing reads or writes these yet) ----------------
+  // Present so the future summariser / risk-classifier is a drop-in and not a
+  // migration. The substrate they will read is the entry -> assignment -> project
+  // join, which exists the moment this model does.
+  aiSummary   String? @db.Text
+  aiRiskScore Int?
+
+  createdById String?
+  updatedById String?
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  team       Team?      @relation(fields: [teamId], references: [id], onDelete: SetNull)
+  project    Project    @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  assignee   User?      @relation("AssignmentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  assignedBy User?      @relation("AssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
+  reviewedBy User?      @relation("AssignmentReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
+  createdBy  User?      @relation("AssignmentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
+  updatedBy  User?      @relation("AssignmentUpdatedBy", fields: [updatedById], references: [id], onDelete: SetNull)
+
+  entries     TaskEntry[]
+  transitions AssignmentTransition[]
+
+  @@index([departmentId, status])
+  @@index([assigneeId, status])
+  @@index([teamId, status])
+  @@index([projectId])
+  @@index([dueDate])
+  @@map("assignments")
+}
+
+/// Every assignment state move, with who and why. Append-only, exactly like
+/// TaskDayTransition — the delivery workflow is as auditable as the approval one.
+model AssignmentTransition {
+  id           String           @id @default(cuid())
+  assignmentId String
+  from         AssignmentStatus
+  to           AssignmentStatus
+  actorId      String?
+  actorName    String?          @db.VarChar(160)
+  note         String?          @db.Text
+  createdAt    DateTime         @default(now())
+
+  assignment Assignment @relation(fields: [assignmentId], references: [id], onDelete: Cascade)
+  actor      User?      @relation(fields: [actorId], references: [id], onDelete: SetNull)
+
+  @@index([assignmentId, createdAt])
+  @@map("assignment_transitions")
+}
+
+// ---------------------------------------------------------------------------
 // AUTHENTICATION & SECURITY
 // ---------------------------------------------------------------------------
 
@@ -629,10 +812,10 @@ model RefreshToken {
   familyId  String @db.VarChar(64)
   tokenHash String @unique @db.VarChar(64)
 
-  expiresAt DateTime
-  revokedAt DateTime?
+  expiresAt      DateTime
+  revokedAt      DateTime?
   /// Set when this token is rotated. Its presence + a fresh use = theft.
-  replacedByHash String? @db.VarChar(64)
+  replacedByHash String?   @db.VarChar(64)
 
   ip        String? @db.VarChar(64)
   userAgent String? @db.VarChar(255)
@@ -649,15 +832,15 @@ model RefreshToken {
 
 /// Hashed, single-use, 5-minute, attempt-limited password reset OTP.
 model PasswordResetOtp {
-  id         String    @id @default(cuid())
-  userId     String
-  otpHash    String    @db.VarChar(120)
-  expiresAt  DateTime
-  attempts   Int       @default(0)
-  consumedAt DateTime?
+  id                  String    @id @default(cuid())
+  userId              String
+  otpHash             String    @db.VarChar(120)
+  expiresAt           DateTime
+  attempts            Int       @default(0)
+  consumedAt          DateTime?
   /// Issued after successful OTP verification; exchanged for the actual reset.
   /// Prevents "verify OTP then reset someone else's password".
-  resetTokenHash String? @unique @db.VarChar(64)
+  resetTokenHash      String?   @unique @db.VarChar(64)
   resetTokenExpiresAt DateTime?
 
   ip        String?  @db.VarChar(64)
@@ -672,15 +855,15 @@ model PasswordResetOtp {
 
 /// Immutable. Never UPDATEd, never DELETEd — not even by the retention job.
 model AuditLog {
-  id      String      @id @default(cuid())
-  action  AuditAction
-  actorId String?
+  id         String      @id @default(cuid())
+  action     AuditAction
+  actorId    String?
   /// Snapshot of the actor's role/email at the time — survives later changes.
-  actorEmail String?  @db.VarChar(190)
+  actorEmail String?     @db.VarChar(190)
   actorRole  Role?
 
-  entityType String? @db.VarChar(64)
-  entityId   String? @db.VarChar(64)
+  entityType   String? @db.VarChar(64)
+  entityId     String? @db.VarChar(64)
   /// Free-form scope tag so Management can filter audit by department.
   departmentId String? @db.VarChar(32)
 
@@ -749,15 +932,15 @@ model Notification {
 /// Nightly materialised aggregate. Dashboards read from here, never from
 /// task_entries — keeps executive views sub-50ms as the fact table grows.
 model DailyProductivityRollup {
-  id           String   @id @default(cuid())
-  workDate     DateTime @db.Date
+  id       String   @id @default(cuid())
+  workDate DateTime @db.Date
 
   /// NULLABLE + SetNull, same reasoning as TaskDay.userId.
   /// A deleted employee's historical productivity is still part of the
   /// department's history. Cascading it away would make last quarter's numbers
   /// silently shrink the day somebody left.
   userId       String?
-  employeeName String?  @db.VarChar(160)
+  employeeName String? @db.VarChar(160)
 
   departmentId String
   teamId       String?
@@ -794,12 +977,12 @@ model DailyProductivityRollup {
 /// Azure App Service scales out; without this, every instance fires every job —
 /// three reminder emails and three concurrent 180-day deletes.
 model SchedulerLock {
-  name        String   @id @db.VarChar(64)
+  name        String    @id @db.VarChar(64)
   lockedUntil DateTime
-  owner       String   @db.VarChar(64)
+  owner       String    @db.VarChar(64)
   lastRunAt   DateTime?
   lastRunOk   Boolean?
-  lastRunNote String?  @db.VarChar(500)
+  lastRunNote String?   @db.VarChar(500)
 
   @@map("scheduler_locks")
 }
@@ -823,9 +1006,9 @@ model SystemSetting {
 /// Non-working days. Without this, the reminder job emails 300 people on a
 /// public holiday and every compliance metric shows a false 0%.
 model Holiday {
-  id   String   @id @default(cuid())
-  date DateTime @db.Date
-  name String   @db.VarChar(160)
+  id           String   @id @default(cuid())
+  date         DateTime @db.Date
+  name         String   @db.VarChar(160)
   /// NULL = applies to every department.
   departmentId String?
 

@@ -64,6 +64,23 @@ export const PERMISSIONS = Object.freeze({
    *  person who worked late is the person who knows they worked late. */
   TASK_ADD_OVERTIME: 'task:add-overtime',
 
+  // --- assignments ---------------------------------------------------------
+  /** Read assignments (scope decides whose — SELF sees only their own). */
+  ASSIGNMENT_READ: 'assignment:read',
+  /** Assign work to an employee. A lead/management act, always audited. */
+  ASSIGNMENT_CREATE: 'assignment:create',
+  /** Edit an assignment's brief (title, description, due date, priority). */
+  ASSIGNMENT_UPDATE: 'assignment:update',
+  /** The employee's move: mark their assigned task done and hand it back for
+   *  review. Deliberately separate from CREATE/REVIEW — an employee may declare
+   *  their own work finished, but may neither assign nor sign it off. */
+  ASSIGNMENT_SUBMIT: 'assignment:submit',
+  /** The lead's move: confirm a submitted assignment DONE, or reopen it. */
+  ASSIGNMENT_REVIEW: 'assignment:review',
+  /** Call off an assignment. Never deletes it — the hours logged against it and
+   *  the trail of who assigned what both survive. */
+  ASSIGNMENT_CANCEL: 'assignment:cancel',
+
   // --- insight -------------------------------------------------------------
   DASHBOARD_SELF: 'dashboard:self',
   DASHBOARD_TEAM: 'dashboard:team',
@@ -87,6 +104,10 @@ const EMPLOYEE_PERMISSIONS = [
   PERMISSIONS.TASK_HISTORY_READ,
   PERMISSIONS.TASK_SUBMIT,
   PERMISSIONS.TASK_ADD_OVERTIME,
+  // An employee sees the work assigned to them and may declare it done — but the
+  // assigning and the sign-off are a lead's job (added in TECH_LEAD below).
+  PERMISSIONS.ASSIGNMENT_READ,
+  PERMISSIONS.ASSIGNMENT_SUBMIT,
   PERMISSIONS.PROJECT_READ,
   PERMISSIONS.TEAM_READ,
   PERMISSIONS.DEPARTMENT_READ,
@@ -106,6 +127,12 @@ const TECH_LEAD_PERMISSIONS = [
   PERMISSIONS.TASK_REJECT,
   PERMISSIONS.TASK_REMARK,
   PERMISSIONS.TASK_OVERRIDE_LOCK,
+  // Assigning work, editing the brief, signing it off, and calling it off are all
+  // the lead's remit — bounded to their own department by the scope engine.
+  PERMISSIONS.ASSIGNMENT_CREATE,
+  PERMISSIONS.ASSIGNMENT_UPDATE,
+  PERMISSIONS.ASSIGNMENT_REVIEW,
+  PERMISSIONS.ASSIGNMENT_CANCEL,
   PERMISSIONS.USER_READ,
   // A Tech Lead can issue a temporary password to an employee who is locked out
   // — the person is standing at their desk and cannot wait for Management. The

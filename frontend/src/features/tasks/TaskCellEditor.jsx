@@ -48,6 +48,7 @@ import {
   ButtonBase,
 } from '@mui/material';
 import HistoryIcon from '@mui/icons-material/HistoryOutlined';
+import AssignmentIcon from '@mui/icons-material/AssignmentTurnedInOutlined';
 import CheckCircleIcon from '@mui/icons-material/CheckCircle';
 import ErrorOutlineIcon from '@mui/icons-material/ErrorOutline';
 import SyncIcon from '@mui/icons-material/Sync';
@@ -75,6 +76,8 @@ const SAVE_STATE = {
 const emptyDraft = () => ({
   description: '',
   projectId: null,
+  assignmentId: null,
+  unassigned: false,
   remarks: null,
   attributes: {},
   version: undefined,
@@ -85,6 +88,10 @@ const draftFromEntry = (entry) =>
     ? {
         description: entry.description ?? '',
         projectId: entry.projectId ?? null,
+        assignmentId: entry.assignmentId ?? null,
+        // A saved hour with no assignment IS "Other work" — a decision already
+        // made, not an unanswered prompt.
+        unassigned: !entry.assignmentId,
         remarks: entry.remarks ?? null,
         attributes: entry.attributes ?? {},
         version: entry.version,
@@ -95,6 +102,13 @@ export default function TaskCellEditor({
   cell,
   fieldDefinitions = [],
   projects = [],
+  /**
+   * The employee's open assigned tasks (ASSIGNED / IN_PROGRESS). When this is
+   * non-empty, each hour must name one — or be explicitly "Other work". That is
+   * the "required only if assigned" rule; it is derived from this list, so no
+   * separate flag is needed.
+   */
+  assignments = [],
   readOnly = false,
   onSave,
   onViewHistory,
@@ -155,6 +169,35 @@ export default function TaskCellEditor({
     [projects, draft.projectId],
   );
 
+  const selectedAssignment = useMemo(
+    () => assignments.find((a) => a.id === draft.assignmentId),
+    [assignments, draft.assignmentId],
+  );
+
+  const hasAssignments = assignments.length > 0;
+  // The single-select value: an assignment id, the "Other work" sentinel, or ''
+  // (nothing chosen yet — only possible for a fresh cell when work is assigned).
+  const OTHER = '__OTHER__';
+  const assignmentChoice = draft.assignmentId ?? (draft.unassigned ? OTHER : '');
+
+  const chooseAssignment = (value) => {
+    if (value === OTHER) {
+      update({ assignmentId: null, unassigned: true });
+    } else if (value === '') {
+      update({ assignmentId: null, unassigned: false });
+    } else {
+      // Picking a task auto-fills its project — the assignment already knows what
+      // it is for, so we mirror the server's auto-fill in the form immediately.
+      const a = assignments.find((x) => x.id === value);
+      update({ assignmentId: value, unassigned: false, projectId: a?.projectId ?? draft.projectId });
+    }
+  };
+
+  // When a task is chosen its project is fixed by the task, so we hide the project
+  // picker. "Other work" (or no assignments at all) shows it exactly as before.
+  const projectPickerVisible = !draft.assignmentId;
+  const mustChooseAssignment = hasAssignments && !draft.assignmentId && !draft.unassigned;
+
   const persist = useCallback(
     async (payload, { isAutoSave }) => {
       setSaveState(SAVE_STATE.SAVING);
@@ -166,6 +209,8 @@ export default function TaskCellEditor({
           timeSlotId: timeSlot.id,
           description: payload.description,
           projectId: payload.projectId,
+          assignmentId: payload.assignmentId ?? null,
+          unassigned: payload.unassigned ?? false,
           remarks: payload.remarks || null,
           attributes: Object.keys(payload.attributes ?? {}).length ? payload.attributes : null,
           version: payload.version,
@@ -268,8 +313,11 @@ export default function TaskCellEditor({
 
   const chars = draft.description.length;
   const overLimit = chars > TASK_DESCRIPTION_MAX;
+  // A chosen assignment supplies the project, so the project requirement is met by
+  // the task itself. "Other work" falls back to the normal project rule.
+  const projectSatisfied = Boolean(draft.assignmentId) || !projectRequired || Boolean(draft.projectId);
   const canSave =
-    Boolean(draft.description.trim()) && (!projectRequired || Boolean(draft.projectId)) && !overLimit;
+    Boolean(draft.description.trim()) && projectSatisfied && !mustChooseAssignment && !overLimit;
 
   const borderColour = isCurrentHour
     ? 'primary.main'
@@ -401,6 +449,17 @@ export default function TaskCellEditor({
               </Typography>
 
               <Stack direction="row" spacing={0.75} alignItems="center" sx={{ mt: 1, flexWrap: 'wrap', gap: 0.5 }}>
+                {entry.assignment && (
+                  <Chip
+                    size="small"
+                    icon={<AssignmentIcon sx={{ fontSize: 13 }} />}
+                    label={entry.assignment.title}
+                    title={`Assigned task: ${entry.assignment.title}`}
+                    color="secondary"
+                    variant="outlined"
+                    sx={{ height: 20, fontSize: 11, fontWeight: 600, maxWidth: 220, '& .MuiChip-label': { overflow: 'hidden', textOverflow: 'ellipsis' } }}
+                  />
+                )}
                 {entry.project && (
                   <Chip
                     size="small"
@@ -473,13 +532,64 @@ export default function TaskCellEditor({
             {chars}/{TASK_DESCRIPTION_MAX}
           </Typography>
 
+          {/* WHICH ASSIGNED TASK THIS HOUR WAS FOR. Shown only when the employee
+              actually has open assigned work. Picking one ties this hour into the
+              task's progress thread and fills its project automatically; "Other
+              work" logs an ad-hoc hour exactly as before. Required to pick one or
+              the other — that is the "required only if assigned" rule. */}
+          {hasAssignments && (
+            <TextField
+              select
+              fullWidth
+              required
+              size="small"
+              label="Which task?"
+              sx={{ mt: 1.5 }}
+              value={assignmentChoice}
+              onChange={(e) => chooseAssignment(e.target.value)}
+              disabled={readOnly || saveState === SAVE_STATE.SAVING}
+              error={mustChooseAssignment && saveState === SAVE_STATE.ERROR}
+              helperText={
+                selectedAssignment
+                  ? 'This hour counts toward the task above — its project fills in automatically.'
+                  : draft.unassigned
+                    ? 'Ad-hoc work, not tied to an assigned task. Pick the project below.'
+                    : 'Pick the assigned task this hour advanced, or choose “Other work”.'
+              }
+            >
+              {assignments.map((a) => (
+                <MenuItem key={a.id} value={a.id}>
+                  <Stack direction="row" spacing={1} alignItems="center" sx={{ width: '100%', minWidth: 0 }}>
+                    <AssignmentIcon sx={{ fontSize: 16, color: 'primary.main' }} />
+                    <Typography variant="body2" noWrap sx={{ flex: 1, minWidth: 0 }}>
+                      {a.title}
+                    </Typography>
+                    {a.isOverdue && (
+                      <Chip label="OVERDUE" size="small" color="warning" sx={{ height: 18, fontSize: 10 }} />
+                    )}
+                    {a.priority && a.priority !== 'NORMAL' && (
+                      <Chip label={a.priority} size="small" variant="outlined" sx={{ height: 18, fontSize: 10 }} />
+                    )}
+                  </Stack>
+                </MenuItem>
+              ))}
+              <Divider />
+              <MenuItem value={OTHER}>
+                <Typography variant="body2" sx={{ color: 'text.secondary' }}>
+                  Other work (not an assigned task)
+                </Typography>
+              </MenuItem>
+            </TextField>
+          )}
+
           {/* THE ONLY OTHER FIELD — and only for an employee. Project is what
               turns an hour into something a manager can roll up by person, by
               project, by department. A Tech Lead spans every project, so asking
               them to pick one would only produce an arbitrary answer; their sheet
               omits it entirely and the hour files under the department's Internal
-              bucket. Leads may still pick a project when a specific one applies. */}
-          {projectRequired ? (
+              bucket. Leads may still pick a project when a specific one applies.
+              Hidden entirely when a task is chosen — the task fixes the project. */}
+          {projectPickerVisible && (projectRequired ? (
             <TextField
               select
               fullWidth
@@ -543,6 +653,19 @@ export default function TaskCellEditor({
                   </MenuItem>
                 ))}
             </TextField>
+          ))}
+
+          {/* When a task is chosen, show its project as a read-only chip so the
+              hour never looks project-less — the server files it under the task's
+              project. */}
+          {selectedAssignment && (
+            <Stack direction="row" spacing={1} alignItems="center" sx={{ mt: 1.5, color: 'text.secondary' }}>
+              <AssignmentIcon sx={{ fontSize: 16 }} />
+              <Typography variant="caption">
+                Logged against <strong>{selectedAssignment.title}</strong>
+                {selectedAssignment.project ? ` · ${selectedAssignment.project.code}` : ''}
+              </Typography>
+            </Stack>
           )}
 
           {/* Optional. Hidden behind a link, because a field that is usually

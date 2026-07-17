@@ -26,7 +26,7 @@ import {
   leadDigestEmail,
   managementSummaryEmail,
 } from '../modules/notifications/email.templates.js';
-import { SETTING_KEY, DAY_STATUS, DEFAULT_GRACE_MINUTES } from '../config/constants.js';
+import { SETTING_KEY, DAY_STATUS, DEFAULT_GRACE_MINUTES, ASSIGNMENT_OPEN_STATUSES } from '../config/constants.js';
 import {
   todayWorkDate,
   formatWorkDate,
@@ -526,6 +526,90 @@ export const runManagementSummary = () =>
     );
 
     return `Summary sent to ${managers.length} manager(s)`;
+  });
+
+// ---------------------------------------------------------------------------
+// Assignment due / overdue reminders
+// ---------------------------------------------------------------------------
+
+/**
+ * Nudges each assignee about OPEN assigned work that is overdue or due within the
+ * next two days, and rolls overdue work up to whoever assigned it.
+ *
+ * Same dedupe discipline as the hourly check: one alert per assignment per day,
+ * keyed on HOW overdue it is — so a task that slips another day DOES re-alert,
+ * but a task sitting at the same overdue count is not re-announced every morning
+ * until everybody mutes the bell.
+ */
+export const runAssignmentDueReminders = () =>
+  withLock('assignment-reminders', 10 * 60, async () => {
+    const workDate = todayWorkDate();
+    const dateKey = formatWorkDate(workDate);
+    const today = new Date(dateKey); // midnight UTC of the work date
+    const soon = new Date(today);
+    soon.setUTCDate(soon.getUTCDate() + 2);
+    const dayMs = 24 * 60 * 60 * 1000;
+
+    const due = await prisma.assignment.findMany({
+      where: { status: { in: ASSIGNMENT_OPEN_STATUSES }, dueDate: { not: null, lte: soon } },
+      select: {
+        id: true,
+        title: true,
+        dueDate: true,
+        assigneeId: true,
+        assignedById: true,
+        assignee: { select: { email: true } },
+      },
+    });
+    if (!due.length) return 'No assignments due or overdue';
+
+    const assigneeAlerts = [];
+    /** assignerId -> overdue assignments they set */
+    const overdueByAssigner = new Map();
+
+    for (const a of due) {
+      if (!a.assigneeId) continue;
+      const daysOver = Math.floor((today - new Date(formatWorkDate(a.dueDate))) / dayMs);
+      const overdue = daysOver > 0;
+
+      assigneeAlerts.push({
+        userId: a.assigneeId,
+        to: a.assignee?.email,
+        // Re-alerts when daysOver changes; silent while it stays the same.
+        dedupeKey: `assign-due:${dateKey}:${a.id}:${Math.max(0, daysOver)}`,
+        type: overdue ? 'ASSIGNMENT_OVERDUE' : 'ASSIGNMENT_DUE_SOON',
+        level: overdue ? 'WARNING' : 'INFO',
+        title: overdue ? `Overdue: ${a.title}` : `Due soon: ${a.title}`,
+        body: overdue
+          ? `"${a.title}" was due ${formatWorkDate(a.dueDate)} — ${daysOver} day(s) ago.`
+          : `"${a.title}" is due ${formatWorkDate(a.dueDate)}.`,
+        link: `/assignments/${a.id}`,
+        entityType: 'Assignment',
+        entityId: a.id,
+      });
+
+      if (overdue && a.assignedById && a.assignedById !== a.assigneeId) {
+        if (!overdueByAssigner.has(a.assignedById)) overdueByAssigner.set(a.assignedById, []);
+        overdueByAssigner.get(a.assignedById).push(a);
+      }
+    }
+
+    const nudged = await notifyMany(assigneeAlerts);
+
+    // One roll-up per assigner listing everything of theirs that is overdue.
+    const assignerAlerts = [...overdueByAssigner.entries()].map(([assignerId, items]) => ({
+      userId: assignerId,
+      dedupeKey: `assign-overdue-owner:${dateKey}:${assignerId}:${items.length}`,
+      type: 'ASSIGNMENT_OVERDUE',
+      level: items.length >= 3 ? 'CRITICAL' : 'WARNING',
+      title: `${items.length} assignment(s) you set are overdue`,
+      body: `${items.slice(0, 5).map((i) => i.title).join(', ')}${items.length > 5 ? ` and ${items.length - 5} more` : ''}.`,
+      link: '/assignments?overdue=true',
+      entityType: 'Assignment',
+    }));
+    if (assignerAlerts.length) await notifyMany(assignerAlerts);
+
+    return `Assignment reminders: nudged ${nudged}, ${overdueByAssigner.size} assigner(s) alerted`;
   });
 
 // ---------------------------------------------------------------------------

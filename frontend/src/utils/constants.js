@@ -121,6 +121,13 @@ export const PERMISSIONS = Object.freeze({
   DEPARTMENT_READ: 'department:read',
   DEPARTMENT_MANAGE: 'department:manage',
 
+  ASSIGNMENT_READ: 'assignment:read',
+  ASSIGNMENT_CREATE: 'assignment:create',
+  ASSIGNMENT_UPDATE: 'assignment:update',
+  ASSIGNMENT_SUBMIT: 'assignment:submit',
+  ASSIGNMENT_REVIEW: 'assignment:review',
+  ASSIGNMENT_CANCEL: 'assignment:cancel',
+
   DASHBOARD_SELF: 'dashboard:self',
   DASHBOARD_TEAM: 'dashboard:team',
   DASHBOARD_GLOBAL: 'dashboard:global',
@@ -132,6 +139,32 @@ export const PERMISSIONS = Object.freeze({
   SETTINGS_MANAGE: 'settings:manage',
   NOTIFICATION_READ: 'notification:read',
 });
+
+/**
+ * ASSIGNMENT enums — the forward-looking counterpart to a task entry. Unlike a
+ * logged hour, assigned work genuinely HAS a lifecycle and a priority, so these
+ * exist where TASK_STATUS/PRIORITY deliberately do not.
+ */
+export const ASSIGNMENT_STATUS = Object.freeze({
+  ASSIGNED: 'Assigned',
+  IN_PROGRESS: 'In Progress',
+  SUBMITTED: 'In Review',
+  DONE: 'Done',
+  CANCELLED: 'Cancelled',
+});
+export const ASSIGNMENT_STATUSES = Object.freeze(toOptions(ASSIGNMENT_STATUS));
+
+export const ASSIGNMENT_PRIORITY = Object.freeze({
+  LOW: 'Low',
+  NORMAL: 'Normal',
+  HIGH: 'High',
+  URGENT: 'Urgent',
+});
+export const ASSIGNMENT_PRIORITIES = Object.freeze(toOptions(ASSIGNMENT_PRIORITY));
+
+export const ASSIGNMENT_TITLE_MIN = 3;
+export const ASSIGNMENT_TITLE_MAX = 200;
+export const ASSIGNMENT_DESCRIPTION_MAX = 4000;
 
 /** Field types the department-driven task form can render. */
 export const FIELD_TYPE = Object.freeze({

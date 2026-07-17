@@ -148,9 +148,30 @@ export const tasks = {
   reviewDay: (id, body) => client.post(`/tasks/days/${id}/review`, body),
 };
 
+export const assignments = {
+  /** Scoped list. Params: { status, priority, projectId, assigneeId, open, overdue, mine, ... } */
+  list: (params) => get('/assignments', params),
+  /** The caller's (or a given user's) ASSIGNED/IN_PROGRESS work — for the grid picker. */
+  active: (params) => get('/assignments/active', params),
+  /** One assignment with its progress thread (the linked hourly updates) and history. */
+  get: (id) => client.get(`/assignments/${id}`),
+  /** Assign work. body: { assigneeId, projectId, title, description?, priority?, dueDate?, estimatedHours? } */
+  create: (body) => client.post('/assignments', body),
+  /** Edit the brief. Echo `version` for optimistic-concurrency protection. */
+  update: (id, body) => client.patch(`/assignments/${id}`, body),
+  /** (Assignee) mark done and hand back for review. */
+  submit: (id, body = {}) => client.post(`/assignments/${id}/submit`, body),
+  /** (Lead) body: { decision: 'DONE' | 'REOPEN', note? }. The server owns the state machine. */
+  review: (id, body) => client.post(`/assignments/${id}/review`, body),
+  /** (Lead) cancel — never deletes; the logged hours and the trail survive. */
+  cancel: (id, body = {}) => client.post(`/assignments/${id}/cancel`, body),
+};
+
 export const dashboard = {
   /** The CEO overview: one card per department + who to chase. Takes { date }. */
   overview: (params) => get('/dashboard/overview', params),
+  /** Assigned-work delivery: counts + at-risk + needs-review. Scoped. */
+  delivery: (params) => get('/dashboard/delivery', params),
   summary: (params) => get('/dashboard/summary', params),
   // No statusBreakdown / priorityBreakdown: those endpoints are gone. An entry is
   // an hour already worked, so there is no work-status to break down and no
@@ -300,6 +321,7 @@ const api = {
   teams,
   projects,
   tasks,
+  assignments,
   dashboard,
   reports,
   audit,

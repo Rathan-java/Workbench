@@ -35,6 +35,7 @@ import {
 } from '@mui/material';
 import DashboardIcon from '@mui/icons-material/SpaceDashboardOutlined';
 import TaskIcon from '@mui/icons-material/EditCalendarOutlined';
+import AssignmentIcon from '@mui/icons-material/AssignmentOutlined';
 import MonitorIcon from '@mui/icons-material/MonitorHeartOutlined';
 import ApprovalIcon from '@mui/icons-material/FactCheckOutlined';
 import AccountTreeIcon from '@mui/icons-material/AccountTreeOutlined';
@@ -84,6 +85,12 @@ const NAV_SECTIONS = [
          * timesheet.
          */
         requiresDepartment: true,
+      },
+      {
+        label: 'Assignments',
+        to: '/assignments',
+        icon: AssignmentIcon,
+        permission: PERMISSIONS.ASSIGNMENT_READ,
       },
     ],
   },

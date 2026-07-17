@@ -247,6 +247,24 @@ router.get(
 
 /**
  * @openapi
+ * /dashboard/delivery:
+ *   get:
+ *     tags: [Dashboard]
+ *     summary: Assigned-work delivery — on track, at risk, needs review
+ *     description: |
+ *       The assignment axis, alongside compliance (did they log) and effort (how
+ *       many hours). Answers exactly three questions and no more, so it stays a
+ *       glance: five counts (open · due soon · overdue · awaiting review · done
+ *       this week), the overdue assignments most-overdue-first, and the submitted
+ *       assignments waiting on a lead. Scoped — an employee sees their own plate,
+ *       a lead their department's, management all of it.
+ *     responses:
+ *       200: { description: Delivery counts, the at-risk list, and the review queue }
+ */
+route('/delivery', service.getDeliveryOverview);
+
+/**
+ * @openapi
  * /dashboard/compliance:
  *   get:
  *     tags: [Dashboard]

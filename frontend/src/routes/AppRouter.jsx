@@ -33,6 +33,8 @@ const ForceChangePassword = lazy(() => import('../features/auth/ForceChangePassw
 
 const Dashboard = lazy(() => import('../features/dashboard/DashboardPage.jsx'));
 const TaskSheet = lazy(() => import('../features/tasks/TaskSheetPage.jsx'));
+const Assignments = lazy(() => import('../features/assignments/AssignmentsPage.jsx'));
+const AssignmentDetail = lazy(() => import('../features/assignments/AssignmentDetailPage.jsx'));
 const Monitor = lazy(() => import('../features/monitor/MonitorPage.jsx'));
 const Approvals = lazy(() => import('../features/approvals/ApprovalsPage.jsx'));
 const Reports = lazy(() => import('../features/reports/ReportsPage.jsx'));
@@ -158,6 +160,22 @@ export default function AppRouter() {
               <RequireDepartment>
                 <TaskSheet />
               </RequireDepartment>
+            }
+          />
+          <Route
+            path="/assignments"
+            element={
+              <RequirePermission permission={PERMISSIONS.ASSIGNMENT_READ}>
+                <Assignments />
+              </RequirePermission>
+            }
+          />
+          <Route
+            path="/assignments/:id"
+            element={
+              <RequirePermission permission={PERMISSIONS.ASSIGNMENT_READ}>
+                <AssignmentDetail />
+              </RequirePermission>
             }
           />
           <Route path="/profile" element={<Profile />} />

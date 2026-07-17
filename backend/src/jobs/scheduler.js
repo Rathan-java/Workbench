@@ -19,6 +19,7 @@ import {
   runLeadDigest,
   runManagementSummary,
   runUnsubmittedCheck,
+  runAssignmentDueReminders,
 } from './reminders.job.js';
 import { prisma } from '../config/prisma.js';
 
@@ -70,6 +71,14 @@ const JOBS = [
     schedule: () => env.CRON_AUTO_APPROVE,
     run: runAutoApproval,
     description: 'Approve submitted sheets left unreviewed past the auto-approve window',
+  },
+  {
+    name: 'assignment-reminders',
+    // 09:30 on weekdays — one morning nudge for assigned work due soon or overdue.
+    // A literal (like unsubmitted-check) so it needs no new env var to boot.
+    schedule: () => '30 9 * * 1-5',
+    run: runAssignmentDueReminders,
+    description: 'Nudge assignees about assigned work due soon or overdue, and roll overdue up to whoever assigned it',
   },
 ];
 

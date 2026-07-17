@@ -33,6 +33,7 @@ import * as repo from './task.repository.js';
 import { validateAttributes } from './taskAttributes.js';
 import { toEntryDto, toDayDto, toRevisionDto } from './task.dto.js';
 import * as departmentService from '../departments/department.service.js';
+import * as assignmentService from '../assignments/assignment.service.js';
 import * as settings from '../settings/setting.service.js';
 import * as audit from '../audit/audit.service.js';
 import { notify } from '../notifications/notification.service.js';
@@ -55,6 +56,8 @@ import {
   canTransition,
   SETTING_KEY,
   DEFAULT_GRACE_MINUTES,
+  ASSIGNMENT_OPEN_STATUSES,
+  ASSIGNMENT_ACTIVE_STATUSES,
 } from '../../config/constants.js';
 import {
   toWorkDate,
@@ -221,11 +224,14 @@ export const getGrid = async (scope, user, { date, userId }) => {
   const workDate = toWorkDate(date ?? todayWorkDate());
   const { target, viewingSomeoneElse } = await resolveTarget(scope, user, userId);
 
-  const [slots, day, graceMinutes, backdateDays] = await Promise.all([
+  const [slots, day, graceMinutes, backdateDays, activeAssignments] = await Promise.all([
     departmentService.getTimeSlots(target.departmentId),
     repo.findDay(target.id, workDate),
     settings.get(SETTING_KEY.REMINDER_GRACE_MINUTES, DEFAULT_GRACE_MINUTES),
     settings.get(SETTING_KEY.ALLOW_BACKDATED_EDIT_DAYS, 2),
+    // The employee's open assigned work — the grid picker renders from this, and
+    // when it is non-empty the "required only if assigned" rule kicks in.
+    assignmentService.listActiveForUser(scope, target.id),
   ]);
 
   const workingWeekdays = target.department.workingWeekdays ?? [1, 2, 3, 4, 5];
@@ -284,6 +290,10 @@ export const getGrid = async (scope, user, { date, userId }) => {
     // mean picking arbitrarily. Their hours land in the department's Internal
     // bucket unless they say otherwise, and they log a description and move on.
     projectRequired: target.role === ROLE.EMPLOYEE,
+    // The employee's open assigned tasks, for the hourly picker. When non-empty,
+    // `assignmentRequired` tells the UI each hour must name one (or "Other work").
+    assignments: activeAssignments,
+    assignmentRequired: activeAssignments.length > 0,
     day: day
       ? toDayDto({ ...day, entries: undefined })
       : {
@@ -376,6 +386,65 @@ export const saveEntry = async (scope, user, { date, userId, ...input }) => {
 
   await assertProjectBelongsToDepartment(input.projectId, target.departmentId);
 
+  // ── THE ASSIGNMENT LINK ────────────────────────────────────────────────────
+  // The hour can name the assigned task it advanced. The rule (the CEO's ask):
+  //   · If the employee HAS active assigned work, an explicit save must name one
+  //     of those tasks — OR be flagged "Other work" (unassigned). This is the
+  //     "required only if assigned" behaviour; it never blocks someone with no
+  //     assignments, so ad-hoc work and the whole existing flow are untouched.
+  //   · A named assignment must be the employee's OWN, open, and in-department.
+  //     It then auto-fills the project — the assignment already knows what it is
+  //     for, so the employee does not pick a project twice.
+  // Autosave never enforces this: a draft fired mid-typing must not scold someone
+  // who has not reached the picker yet.
+  let linkedAssignment = null;
+  if (input.assignmentId) {
+    linkedAssignment = await prisma.assignment.findUnique({
+      where: { id: input.assignmentId },
+      select: { id: true, assigneeId: true, departmentId: true, projectId: true, status: true },
+    });
+    if (!linkedAssignment || linkedAssignment.assigneeId !== target.id) {
+      throw new BadRequestError('That assigned task is not on this employee’s plate', {
+        code: 'ASSIGNMENT_NOT_ASSIGNEE',
+      });
+    }
+    if (linkedAssignment.departmentId !== target.departmentId) {
+      throw new BadRequestError('That assigned task belongs to a different department', {
+        code: 'ASSIGNMENT_DEPARTMENT_MISMATCH',
+      });
+    }
+    if (!ASSIGNMENT_OPEN_STATUSES.includes(linkedAssignment.status)) {
+      throw new BadRequestError('That assigned task is closed and cannot take new hours', {
+        code: 'ASSIGNMENT_CLOSED',
+      });
+    }
+  } else if (!input.isAutoSave && !input.unassigned && !viewingSomeoneElse) {
+    // The rule is about an employee logging their OWN hour. A lead correcting a
+    // colleague's entry is a different act and is not forced to pick a task.
+    const activeAssignments = await prisma.assignment.count({
+      where: { assigneeId: target.id, status: { in: ASSIGNMENT_ACTIVE_STATUSES } },
+    });
+    if (activeAssignments > 0) {
+      throw new ValidationError(
+        [
+          {
+            path: 'assignmentId',
+            message: 'You have assigned tasks — pick the one this hour is for, or choose "Other work".',
+          },
+        ],
+        'Choose the assigned task this hour belongs to',
+      );
+    }
+  }
+
+  // How the link is written: a chosen assignment sets it; an explicit "Other
+  // work" clears it; otherwise (autosave, or a field left alone) it is untouched.
+  const assignmentIdToWrite = linkedAssignment
+    ? linkedAssignment.id
+    : input.unassigned
+      ? null
+      : undefined;
+
   // WHOSE SHEET DECIDES WHETHER A PROJECT IS REQUIRED.
   // An employee must name one. A Tech Lead need not — their day is spread across
   // every project they oversee, so when they leave it blank their hours fall to
@@ -421,11 +490,12 @@ export const saveEntry = async (scope, user, { date, userId, ...input }) => {
       throw new VersionConflictError(toEntryDto({ ...existing, timeSlot: slot }));
     }
 
-    // The project actually written: what they chose, else what the row already
-    // had, else the role-based default (Internal for a lead, nothing for an
-    // employee). `defaultProjectId` is null for an employee, so the guard below
-    // still fires for them.
-    const finalProjectId = input.projectId ?? existing?.projectId ?? defaultProjectId;
+    // The project actually written: what they chose, else the linked assignment's
+    // project (auto-fill), else what the row already had, else the role-based
+    // default (Internal for a lead, nothing for an employee). `defaultProjectId`
+    // is null for an employee, so the guard below still fires for them.
+    const finalProjectId =
+      input.projectId ?? linkedAssignment?.projectId ?? existing?.projectId ?? defaultProjectId;
 
     // AN EMPLOYEE'S HOUR MUST NAME A PROJECT.
     //
@@ -448,6 +518,9 @@ export const saveEntry = async (scope, user, { date, userId, ...input }) => {
     const data = {
       description: input.description,
       projectId: finalProjectId,
+      // Only touch the link when the caller actually expressed one — undefined
+      // leaves an existing entry's assignment as it was.
+      ...(assignmentIdToWrite !== undefined ? { assignmentId: assignmentIdToWrite } : {}),
       remarks: input.remarks ?? null,
       attributes,
       isLate: existing ? existing.isLate || isLate : isLate,
@@ -483,6 +556,12 @@ export const saveEntry = async (scope, user, { date, userId, ...input }) => {
       previous: existing,
       actorId: user.id,
     });
+
+    // 3b. First hour against an assignment moves it ASSIGNED → IN_PROGRESS, in
+    // the same transaction as the hour that started it. A no-op otherwise.
+    if (linkedAssignment) {
+      await assignmentService.touchProgressInTransaction(tx, linkedAssignment.id, user);
+    }
 
     // 4. Day counters, recomputed from the truth rather than incremented.
     const filledSlots = await tx.taskEntry.count({ where: { taskDayId: day.id } });

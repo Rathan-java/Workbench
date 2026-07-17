@@ -56,6 +56,16 @@ export const saveEntryShape = z.object({
     )
     .max(TASK_DESCRIPTION_MAX, `Keep it under ${TASK_DESCRIPTION_MAX} characters`),
   projectId: z.string().cuid().nullish(),
+  /**
+   * THE ASSIGNMENT THIS HOUR ADVANCED. Optional in the schema — the "required
+   * only if assigned" rule is enforced in task.service, which knows whether the
+   * employee actually has open assigned work (the DTO only has the payload).
+   * Picking one auto-fills the project.
+   */
+  assignmentId: z.string().cuid().nullish(),
+  /** The employee explicitly chose "Other work" — ad-hoc, no assignment. Lets the
+   *  service tell "chose to log unassigned work" apart from "forgot to pick". */
+  unassigned: z.boolean().optional(),
   remarks: z.string().trim().max(TASK_REMARKS_MAX).nullish(),
   /** Department-specific OPTIONAL fields; validated against TaskFieldDefinition. */
   attributes: z.record(z.unknown()).nullish(),
@@ -217,6 +227,12 @@ export const toEntryDto = (e) => ({
         name: e.project.name,
         isInternal: e.project.isInternal ?? false,
       }
+    : null,
+  assignmentId: e.assignmentId ?? null,
+  /** The assigned task this hour advanced, if any — surfaced so the grid can show
+   *  a chip and the monitor can group an employee's hours by assignment. */
+  assignment: e.assignment
+    ? { id: e.assignment.id, title: e.assignment.title, status: e.assignment.status }
     : null,
   remarks: e.remarks ?? null,
   attributes: e.attributes ?? null,

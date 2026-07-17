@@ -18,6 +18,7 @@ const PERSON = { select: { id: true, firstName: true, lastName: true, avatarPath
 export const ENTRY_INCLUDE = {
   timeSlot: { select: { id: true, label: true, startMinute: true, endMinute: true, sortOrder: true } },
   project: { select: { id: true, code: true, name: true, isInternal: true } },
+  assignment: { select: { id: true, title: true, status: true } },
   user: { select: { id: true, firstName: true, lastName: true, avatarPath: true, employeeCode: true } },
   createdBy: PERSON,
   updatedBy: PERSON,

@@ -42,6 +42,82 @@ export const canTransition = (from, to) => (DAY_TRANSITIONS[from] ?? []).include
 /** A day in these states is read-only for its owner. */
 export const LOCKED_DAY_STATUSES = Object.freeze([DAY_STATUS.SUBMITTED, DAY_STATUS.APPROVED]);
 
+/**
+ * ASSIGNMENT — the delivery state of a unit of *assigned* work.
+ *
+ * This is the forward-looking counterpart to a TaskEntry, and it is where the
+ * work-status the entry deliberately lacks (design note 2) legitimately lives:
+ * an assignment genuinely moves through states, an hour already lived does not.
+ * Same table-of-legal-moves discipline as DAY_TRANSITIONS.
+ */
+export const ASSIGNMENT_STATUS = Object.freeze({
+  ASSIGNED: 'ASSIGNED',
+  IN_PROGRESS: 'IN_PROGRESS',
+  SUBMITTED: 'SUBMITTED',
+  DONE: 'DONE',
+  CANCELLED: 'CANCELLED',
+});
+export const ASSIGNMENT_STATUSES = Object.freeze(Object.values(ASSIGNMENT_STATUS));
+
+export const ASSIGNMENT_TRANSITIONS = Object.freeze({
+  // Un-started work can begin, be submitted straight away, or be called off.
+  // CANCEL is ONLY legal here — once work has begun (an hour has been logged),
+  // the task can no longer be cancelled by anyone, including the creator: real
+  // effort has been recorded against it and must not be thrown away. Stopping a
+  // started task is a REOPEN-and-leave decision, not a cancellation.
+  [ASSIGNMENT_STATUS.ASSIGNED]: [
+    ASSIGNMENT_STATUS.IN_PROGRESS,
+    ASSIGNMENT_STATUS.SUBMITTED,
+    ASSIGNMENT_STATUS.CANCELLED,
+  ],
+  [ASSIGNMENT_STATUS.IN_PROGRESS]: [ASSIGNMENT_STATUS.SUBMITTED],
+  // The lead's move: confirm it DONE, or send it back to be worked on (reopen).
+  [ASSIGNMENT_STATUS.SUBMITTED]: [ASSIGNMENT_STATUS.DONE, ASSIGNMENT_STATUS.IN_PROGRESS],
+  // Terminal for the employee. A lead can REOPEN a completed assignment — an
+  // explicit, audited override, never a silent edit.
+  [ASSIGNMENT_STATUS.DONE]: [ASSIGNMENT_STATUS.IN_PROGRESS],
+  // A cancelled assignment can be restored to the backlog.
+  [ASSIGNMENT_STATUS.CANCELLED]: [ASSIGNMENT_STATUS.ASSIGNED],
+});
+
+export const canAssignmentTransition = (from, to) =>
+  (ASSIGNMENT_TRANSITIONS[from] ?? []).includes(to);
+
+/**
+ * "Open" — the assignment is still live and shows on the employee's plate and in
+ * delivery counts. DONE and CANCELLED are closed.
+ */
+export const ASSIGNMENT_OPEN_STATUSES = Object.freeze([
+  ASSIGNMENT_STATUS.ASSIGNED,
+  ASSIGNMENT_STATUS.IN_PROGRESS,
+  ASSIGNMENT_STATUS.SUBMITTED,
+]);
+
+/**
+ * "Active" — work the employee is still expected to act on. This is the set that
+ * drives the "required only if assigned" rule on the hourly grid: if the employee
+ * has an assignment in one of these states, each hour must name one of them (or
+ * be explicitly logged as "Other work"). SUBMITTED is excluded — they believe it
+ * is finished and are waiting on review, so it should not force a tag.
+ */
+export const ASSIGNMENT_ACTIVE_STATUSES = Object.freeze([
+  ASSIGNMENT_STATUS.ASSIGNED,
+  ASSIGNMENT_STATUS.IN_PROGRESS,
+]);
+
+export const ASSIGNMENT_PRIORITY = Object.freeze({
+  LOW: 'LOW',
+  NORMAL: 'NORMAL',
+  HIGH: 'HIGH',
+  URGENT: 'URGENT',
+});
+export const ASSIGNMENT_PRIORITY_LIST = Object.freeze(Object.values(ASSIGNMENT_PRIORITY));
+
+/** Assignment title/description limits — enforced identically by Zod and the UI. */
+export const ASSIGNMENT_TITLE_MIN = 3;
+export const ASSIGNMENT_TITLE_MAX = 200;
+export const ASSIGNMENT_DESCRIPTION_MAX = 4000;
+
 export const ROLE = Object.freeze({
   MANAGEMENT: 'MANAGEMENT',
   TECH_LEAD: 'TECH_LEAD',
@@ -119,6 +195,14 @@ export default {
   DAY_TRANSITIONS,
   canTransition,
   LOCKED_DAY_STATUSES,
+  ASSIGNMENT_STATUS,
+  ASSIGNMENT_STATUSES,
+  ASSIGNMENT_TRANSITIONS,
+  canAssignmentTransition,
+  ASSIGNMENT_OPEN_STATUSES,
+  ASSIGNMENT_ACTIVE_STATUSES,
+  ASSIGNMENT_PRIORITY,
+  ASSIGNMENT_PRIORITY_LIST,
   ROLE,
   ROLE_LIST,
   USER_STATUS,

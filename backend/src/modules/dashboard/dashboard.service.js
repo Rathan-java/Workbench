@@ -29,7 +29,13 @@ import {
   isoWeekdayOf,
   dayjs,
 } from '../../utils/date.js';
-import { DAY_STATUS, SETTING_KEY, DEFAULT_GRACE_MINUTES } from '../../config/constants.js';
+import {
+  DAY_STATUS,
+  SETTING_KEY,
+  DEFAULT_GRACE_MINUTES,
+  ASSIGNMENT_STATUS,
+  ASSIGNMENT_OPEN_STATUSES,
+} from '../../config/constants.js';
 import * as settings from '../settings/setting.service.js';
 import { fullName } from '../../utils/name.js';
 
@@ -939,6 +945,88 @@ export const getTeamFollowUp = async (scope, { date, departmentId } = {}) => {
       companyFillRate: pct(totalFilled, totalExpected),
       employeesBehind: rows.reduce((s, r) => s + r.membersBehind.length, 0),
     },
+  };
+};
+
+/**
+ * DELIVERY — the assignment axis, the counterpart to the compliance/effort views.
+ *
+ * The other dashboards answer "did people LOG their hours" and "how MANY hours".
+ * This one answers "is the ASSIGNED work getting done", and it holds itself to
+ * three questions on purpose, so it stays a glance and not a spreadsheet:
+ *
+ *   1. Is assigned work on track?  → five counts (open · due soon · overdue ·
+ *      awaiting review · done this week).
+ *   2. What is at risk?            → overdue open assignments, most overdue first.
+ *   3. What needs review?          → submitted assignments waiting on a lead,
+ *      which the frontend folds into the existing Approvals surface.
+ *
+ * Scope is free: assignments carry departmentId and an employee owns theirs via
+ * assigneeId, so the same engine that guards every other view guards this one. An
+ * employee sees their own plate; a lead their department's; management all of it.
+ * Read live — assignments are few next to hourly entries, and the whole value
+ * here is "right now".
+ */
+export const getDeliveryOverview = async (scope, { departmentId, teamId } = {}) => {
+  const base = scopedWhereWithFilters(scope, { departmentId, teamId }, { userField: 'assigneeId' });
+  const today = toWorkDate(todayWorkDate());
+  const dueSoonBy = dayjs.utc(today).add(2, 'day').toDate(); // due within ~48h
+  const doneSince = dayjs.utc(today).subtract(6, 'day').toDate(); // "this week" = trailing 7 days
+
+  const openStatuses = { status: { in: ASSIGNMENT_OPEN_STATUSES } };
+
+  const [open, dueSoon, overdue, awaitingReview, doneThisWeek] = await prisma.$transaction([
+    prisma.assignment.count({ where: and(base, openStatuses) }),
+    prisma.assignment.count({ where: and(base, openStatuses, { dueDate: { gte: today, lte: dueSoonBy } }) }),
+    prisma.assignment.count({ where: and(base, openStatuses, { dueDate: { lt: today } }) }),
+    prisma.assignment.count({ where: and(base, { status: ASSIGNMENT_STATUS.SUBMITTED }) }),
+    prisma.assignment.count({ where: and(base, { status: ASSIGNMENT_STATUS.DONE, completedAt: { gte: doneSince } }) }),
+  ]);
+
+  const listSelect = {
+    id: true,
+    title: true,
+    status: true,
+    priority: true,
+    dueDate: true,
+    assigneeName: true,
+    assignee: { select: { id: true, firstName: true, lastName: true, avatarPath: true } },
+    department: { select: { id: true, name: true, colorHex: true } },
+  };
+
+  const shape = (a) => ({
+    id: a.id,
+    title: a.title,
+    status: a.status,
+    priority: a.priority,
+    dueDate: a.dueDate ? formatWorkDate(a.dueDate) : null,
+    daysOverdue: a.dueDate ? Math.max(0, dayjs.utc(today).diff(dayjs.utc(a.dueDate), 'day')) : 0,
+    assignee: a.assignee
+      ? { id: a.assignee.id, fullName: fullName(a.assignee), avatarPath: a.assignee.avatarPath }
+      : { id: null, fullName: a.assigneeName ?? 'Former employee', avatarPath: null },
+    department: a.department ?? null,
+  });
+
+  const [atRisk, needsReview] = await Promise.all([
+    prisma.assignment.findMany({
+      where: and(base, openStatuses, { dueDate: { lt: today } }),
+      select: listSelect,
+      orderBy: [{ dueDate: 'asc' }, { priority: 'desc' }],
+      take: 12,
+    }),
+    prisma.assignment.findMany({
+      where: and(base, { status: ASSIGNMENT_STATUS.SUBMITTED }),
+      select: { ...listSelect, submittedAt: true },
+      orderBy: { submittedAt: 'asc' }, // longest-waiting first — that is who to review next
+      take: 12,
+    }),
+  ]);
+
+  return {
+    date: formatWorkDate(today),
+    counts: { open, dueSoon, overdue, awaitingReview, doneThisWeek },
+    atRisk: atRisk.map(shape),
+    needsReview: needsReview.map((a) => ({ ...shape(a), submittedAt: a.submittedAt?.toISOString() ?? null })),
   };
 };
 

@@ -448,6 +448,10 @@ export default function TaskSheetPage() {
               autoExpand={isMobile ? false : cell.isCurrentHour}
               // Employees must name a project; a Tech Lead's sheet does not ask.
               projectRequired={grid.projectRequired ?? true}
+              // The employee's open assigned tasks. When they have any, each hour
+              // must name one (or "Other work") — the "required only if assigned"
+              // rule. Picking a task auto-fills its project.
+              assignments={grid.assignments ?? []}
               // An extra hour is undoable while it is still empty — the mirror of
               // the "+" that added it. Not offered for real working hours, nor
               // once something has been logged (the server would refuse anyway).

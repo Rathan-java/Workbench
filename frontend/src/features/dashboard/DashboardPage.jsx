@@ -51,6 +51,7 @@ import DayNavigator from './components/DayNavigator.jsx';
 import DepartmentCard from './components/DepartmentCard.jsx';
 import UpdateRequiredCard from './components/UpdateRequiredCard.jsx';
 import CompliancePanel from './components/CompliancePanel.jsx';
+import DeliveryPanel from './components/DeliveryPanel.jsx';
 import DetailedAnalytics from './DetailedAnalytics.jsx';
 
 import { dashboard } from '../../api/endpoints.js';
@@ -273,6 +274,13 @@ export default function DashboardPage() {
           </Grid>
         )}
       </Grid>
+
+      {/* ─── ASSIGNED WORK — the delivery axis ─────────────────────────────
+        * Compliance (above) is "did they log their hours". This is "is the
+        * assigned work getting done". It hides itself when nothing is assigned. */}
+      <Box sx={{ mt: 3 }}>
+        <DeliveryPanel />
+      </Box>
 
       {/* ─── EVERYTHING ELSE, ONE CLICK AWAY ─────────────────────────────── */}
       <Divider sx={{ my: 3.5 }}>
