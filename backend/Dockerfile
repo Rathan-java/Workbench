@@ -77,6 +77,7 @@ HEALTHCHECK --interval=30s --timeout=5s --start-period=40s --retries=3 \
 # severing in-flight requests and defeating the graceful shutdown in server.js.
 ENTRYPOINT ["/sbin/tini", "--"]
 
-# Migrations run at boot, not at build. `migrate deploy` is idempotent and only
-# applies what is pending, so a rolling deploy of three instances is safe.
-CMD ["sh", "-c", "npx prisma migrate deploy && node prisma/seed.js && node src/server.js"]
+# Migrations are opt-in at boot. Production should normally run migrations as a
+# separate privileged operation, then start this container with a restricted
+# CRUD-only database user.
+CMD ["sh", "-c", "if [ \"$RUN_MIGRATIONS_ON_STARTUP\" = \"true\" ]; then npx prisma migrate deploy; fi; if [ \"$RUN_SEED_ON_STARTUP\" != \"false\" ]; then node prisma/seed.js; fi; node src/server.js"]

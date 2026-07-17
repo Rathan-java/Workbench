@@ -75,6 +75,8 @@ services:
       CLIENT_URL: http://localhost:8080
       COOKIE_SECURE: 'false' # localhost has no TLS; NEVER false in real production
       TRUST_PROXY: '1'
+      RUN_MIGRATIONS_ON_STARTUP: 'true'
+      RUN_SEED_ON_STARTUP: 'true'
     env_file:
       - ./backend/.env
     ports:
@@ -101,7 +103,7 @@ services:
     depends_on:
       - api
     ports:
-      - '8080:80'
+      - '8080:8080'
 
 volumes:
   mysql_data:

@@ -32,12 +32,16 @@ FROM nginx:1.27-alpine AS production
 
 RUN rm -rf /usr/share/nginx/html/*
 COPY --from=build /app/dist /usr/share/nginx/html
-COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY nginx.conf /etc/nginx/templates/default.conf.template
+
+# Docker Compose provides an `api` service on the same network. Azure App
+# Service overrides this with the API app's public origin.
+ENV API_UPSTREAM=http://api:4000
 
 # nginx's own worker processes already drop to an unprivileged user, but the
 # master runs as root to bind :80. Bind :8080 instead and run the whole thing
 # unprivileged — a container that never needs root should never have it.
-RUN sed -i 's/listen\s*80;/listen 8080;/' /etc/nginx/conf.d/default.conf \
+RUN sed -i 's/listen\s*80;/listen 8080;/' /etc/nginx/templates/default.conf.template \
  && sed -i '/user  nginx;/d' /etc/nginx/nginx.conf \
  && sed -i 's|/var/run/nginx.pid|/tmp/nginx.pid|' /etc/nginx/nginx.conf \
  && chown -R nginx:nginx /usr/share/nginx/html /var/cache/nginx /etc/nginx

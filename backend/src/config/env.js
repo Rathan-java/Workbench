@@ -169,4 +169,11 @@ if (env.isProd && !env.COOKIE_SECURE) {
   process.exit(1);
 }
 
+if (env.isProd && !/[?&](sslaccept=strict|ssl=true|sslmode=require)(?:&|$)/i.test(env.DATABASE_URL)) {
+  console.error(
+    '\nâœ– Production DATABASE_URL must require MySQL SSL/TLS. Add ?sslaccept=strict, ?ssl=true, or ?sslmode=require.\n',
+  );
+  process.exit(1);
+}
+
 export default env;
