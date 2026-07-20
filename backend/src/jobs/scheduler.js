@@ -14,6 +14,7 @@ import { logger } from '../config/logger.js';
 import { runRetentionCleanup } from './retentionCleanup.job.js';
 import { runRollup } from './rollup.job.js';
 import { runAutoApproval } from './autoApproval.job.js';
+import { runAiAnalysis } from './aiAnalysis.job.js';
 import {
   runHourlyReminders,
   runLeadDigest,
@@ -79,6 +80,14 @@ const JOBS = [
     schedule: () => '30 9 * * 1-5',
     run: runAssignmentDueReminders,
     description: 'Nudge assignees about assigned work due soon or overdue, and roll overdue up to whoever assigned it',
+  },
+  {
+    name: 'ai-analysis',
+    // Every second hour at :10 — offset from the hourly sweeps so a run of
+    // metered API calls never coincides with the reminder job.
+    schedule: () => env.CRON_AI_ANALYSIS,
+    run: runAiAnalysis,
+    description: 'Compare assigned work against logged hours and record AI findings',
   },
 ];
 

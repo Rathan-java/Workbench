@@ -50,6 +50,35 @@ export const PROJECT_STATUS_TONE = {
   ARCHIVED: 'neutral',
 };
 
+export const MODULE_STATUS_TONE = {
+  PENDING: 'neutral',
+  IN_PROGRESS: 'primary',
+  COMPLETED: 'success',
+};
+
+/**
+ * AI findings.
+ *
+ * NOTHING HERE IS RED, INCLUDING CRITICAL. Red in this product means "this
+ * destroys data". A finding destroys nothing — it is the analyser asking a lead
+ * to go and look at somebody's afternoon. Amber carries that urgency honestly;
+ * red would make a routine two-hourly sweep read like an outage, and a screen
+ * that cries wolf every two hours stops being read at all.
+ */
+export const INSIGHT_SEVERITY_TONE = {
+  INFO: 'neutral',
+  WARNING: 'warning',
+  CRITICAL: 'amber',
+};
+
+export const INSIGHT_KIND_TONE = {
+  MISALIGNED: 'purple',
+  IDLE: 'amber',
+  LOW_SUBSTANCE: 'warning',
+  AT_RISK: 'warning',
+  ON_TRACK: 'success',
+};
+
 /**
  * Audit actions, coloured by FAMILY rather than individually — 35 distinct hues
  * is noise. The one thing an auditor scans for is the red band: destruction and

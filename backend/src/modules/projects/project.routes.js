@@ -43,6 +43,25 @@ const createSchema = z.object({
  */
 const updateSchema = createSchema.partial();
 
+const moduleParams = idParam.extend({ moduleId: z.string().cuid() });
+
+const MODULE_STATUSES = ['PENDING', 'IN_PROGRESS', 'COMPLETED'];
+
+const moduleCreateSchema = z.object({
+  name: z.string().trim().min(2).max(120),
+  description: z.string().trim().max(2000).optional().or(z.literal('')),
+  sortOrder: z.number().int().min(0).max(9999).optional(),
+});
+
+/**
+ * `completedAt` is absent on purpose: it is derived from the status transition
+ * in the service, so a client can never claim a completion date for a module
+ * that is not actually complete.
+ */
+const moduleUpdateSchema = moduleCreateSchema
+  .partial()
+  .extend({ status: z.enum(MODULE_STATUSES).optional() });
+
 /**
  * @openapi
  * tags:
@@ -52,10 +71,11 @@ const updateSchema = createSchema.partial();
  *     own department (they need them to tag a task); only Management can create
  *     or change them.
  *
- *     A project has no sub-level — no modules, no epics. Every logged hour names
- *     exactly one project, and each department has an `isInternal` "Internal /
- *     Non-project" project so the hours that belong to no project have an honest
- *     home.
+ *     Every logged hour names exactly one project — never a module — and each
+ *     department has an `isInternal` "Internal / Non-project" project so the
+ *     hours that belong to no project have an honest home. Modules are a
+ *     management-side breakdown of a project; assignments point at them, so
+ *     nobody is asked to classify their own hours.
  *
  *     There is no delete. A project that has collected hours cannot be removed
  *     without disturbing them, so projects are retired with `status: ARCHIVED` —
@@ -169,6 +189,93 @@ router
     asyncHandler(async (req, res) =>
       ok(res, await service.destroy(req.scope, req.params.id), { message: 'Project deleted' }),
     ),
+  );
+
+/**
+ * @openapi
+ * /projects/{id}/modules:
+ *   get:
+ *     tags: [Projects]
+ *     summary: The modules of a project
+ *     description: |
+ *       Ordered by `sortOrder`, then name. Includes retired modules
+ *       (`isActive: false`) so the assignments still hanging off them stay
+ *       visible; each carries its assignment count and the number of hourly
+ *       entries logged through those assignments.
+ *     responses:
+ *       200: { description: Modules }
+ *       404: { description: Project not found }
+ *   post:
+ *     tags: [Projects]
+ *     summary: Add a module to a project
+ *     description: |
+ *       `sortOrder` defaults to the end of the list. Module names are unique
+ *       within a project, retired ones included.
+ *     responses:
+ *       201: { description: Module created }
+ *       409: { description: A module of that name already exists on the project }
+ */
+router
+  .route('/:id/modules')
+  .get(
+    authorize(PERMISSIONS.PROJECT_READ),
+    validate({ params: idParam }),
+    asyncHandler(async (req, res) => ok(res, await service.listModules(req.scope, req.params.id))),
+  )
+  .post(
+    authorize(PERMISSIONS.PROJECT_MANAGE),
+    validate({ params: idParam, body: moduleCreateSchema }),
+    asyncHandler(async (req, res) =>
+      created(res, await service.addModule(req.scope, req.params.id, req.body), {
+        message: 'Module added',
+      }),
+    ),
+  );
+
+/**
+ * @openapi
+ * /projects/{id}/modules/{moduleId}:
+ *   patch:
+ *     tags: [Projects]
+ *     summary: Update a module
+ *     description: |
+ *       Moving `status` to `COMPLETED` stamps `completedAt`; moving it away
+ *       clears the stamp again, so a completion date never outlives the
+ *       completion it describes.
+ *     responses:
+ *       200: { description: Updated }
+ *       404: { description: Module not found on this project }
+ *       409: { description: A module of that name already exists on the project }
+ *   delete:
+ *     tags: [Projects]
+ *     summary: Remove a module
+ *     description: |
+ *       A module with assignments behind it is RETIRED (`isActive: false`), not
+ *       deleted — deleting it would cut those assignments loose from the
+ *       deliverable they advance. One with no assignments is deleted outright.
+ *       The response says which happened: `{ retired: true }` or `{ deleted: true }`.
+ *     responses:
+ *       200: { description: Module deleted or retired }
+ *       404: { description: Module not found on this project }
+ */
+router
+  .route('/:id/modules/:moduleId')
+  .patch(
+    authorize(PERMISSIONS.PROJECT_MANAGE),
+    validate({ params: moduleParams, body: moduleUpdateSchema }),
+    asyncHandler(async (req, res) =>
+      ok(res, await service.updateModule(req.scope, req.params.id, req.params.moduleId, req.body), {
+        message: 'Module updated',
+      }),
+    ),
+  )
+  .delete(
+    authorize(PERMISSIONS.PROJECT_MANAGE),
+    validate({ params: moduleParams }),
+    asyncHandler(async (req, res) => {
+      const result = await service.removeModule(req.scope, req.params.id, req.params.moduleId);
+      return ok(res, result, { message: result.retired ? 'Module retired' : 'Module deleted' });
+    }),
   );
 
 export default router;

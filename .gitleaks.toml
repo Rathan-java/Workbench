@@ -1,0 +1,51 @@
+# =============================================================================
+#  gitleaks configuration — Ara Workbench
+#
+#  The CI "Check for secrets in the diff" step (gitleaks) scans every commit for
+#  committed credentials. That gate is worth keeping. But a handful of files in
+#  this repo exist SPECIFICALLY to document configuration, and by construction
+#  hold only placeholders and local-dev defaults — never a real secret:
+#
+#    - *.env.example         → `<placeholders>` and `change-me` values
+#    - azure-setup.sh /       → every credential is a CHANGE_ME token the operator
+#      azure-deploy.sh          replaces before running
+#    - db-setup.sql          → CHANGE_ME app-user password
+#    - docker-compose.yml    → throwaway local dev creds (root:root, MailHog)
+#    - .github/workflows/ci.yml → deterministic CI-only test secrets
+#
+#  Real secrets live ONLY in backend/.env (gitignored) and Azure App Service app
+#  settings. Scanning the files above produces false positives that fail the
+#  build on documented non-secrets, which trains people to bypass the gate — the
+#  exact failure mode the CI comments warn about elsewhere.
+#
+#  So: keep gitleaks' full default ruleset, and allowlist these template files
+#  and the well-known placeholder tokens. Nothing else is relaxed.
+# =============================================================================
+
+title = "Ara Workbench gitleaks config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Documented placeholders in example, template and deployment files"
+paths = [
+  '''\.env\.example$''',
+  '''(^|/)azure-setup\.sh$''',
+  '''(^|/)azure-deploy\.sh$''',
+  '''(^|/)db-setup\.sql$''',
+  '''(^|/)docker-compose\.yml$''',
+  '''(^|/)DEPLOYMENT\.md$''',
+  '''(^|/)\.github/workflows/ci\.yml$''',
+]
+# Belt-and-braces: even outside the files above, these exact placeholder/dev
+# tokens are never real secrets.
+regexes = [
+  '''CHANGE[_-]?ME[A-Z0-9_-]*''',
+  '''change-me[a-z0-9-]*''',
+  '''ChangeMe@Admin123''',
+  '''Password@2026!''',
+  '''<[a-z0-9-]+>''',
+  '''mysql://root:root@''',
+  '''ci-(access|refresh)-secret-that-is-at-least-32-characters-long''',
+]

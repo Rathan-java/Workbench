@@ -61,6 +61,39 @@ export const PROJECT_STATUS = Object.freeze({
 });
 export const PROJECT_STATUSES = Object.freeze(toOptions(PROJECT_STATUS));
 
+/**
+ * A project MODULE is a deliverable inside a project. Unlike a logged hour it is
+ * forward-looking, so — like an assignment — it genuinely has a lifecycle.
+ */
+export const MODULE_STATUS = Object.freeze({
+  PENDING: 'Pending',
+  IN_PROGRESS: 'In Progress',
+  COMPLETED: 'Completed',
+});
+export const MODULE_STATUSES = Object.freeze(toOptions(MODULE_STATUS));
+
+/**
+ * AI ANALYSER enums. `kind` is what the analyser found; `severity` is how loudly
+ * it is saying it. ON_TRACK is a finding too — it is the audit trail that proves
+ * the analyser looked and was satisfied, which is why it is filtered out of the
+ * worklist rather than never recorded.
+ */
+export const INSIGHT_KIND = Object.freeze({
+  MISALIGNED: 'Misaligned',
+  IDLE: 'Idle',
+  LOW_SUBSTANCE: 'Low Substance',
+  AT_RISK: 'At Risk',
+  ON_TRACK: 'On Track',
+});
+export const INSIGHT_KINDS = Object.freeze(toOptions(INSIGHT_KIND));
+
+export const INSIGHT_SEVERITY = Object.freeze({
+  INFO: 'Info',
+  WARNING: 'Warning',
+  CRITICAL: 'Critical',
+});
+export const INSIGHT_SEVERITIES = Object.freeze(toOptions(INSIGHT_SEVERITY));
+
 export const EXPORT_FORMATS = Object.freeze([
   { value: 'EXCEL', label: 'Excel (.xlsx)' },
   { value: 'CSV', label: 'CSV' },

@@ -117,6 +117,21 @@ const schema = z.object({
   CRON_LEAD_DIGEST: z.string().default('30 13,18 * * 1-5'),
   CRON_MANAGEMENT_SUMMARY: z.string().default('0 19 * * 1-5'),
   CRON_AUTO_APPROVE: z.string().default('40 * * * *'), // :40 every hour
+  CRON_AI_ANALYSIS: z.string().default('10 */2 * * *'), // :10 every 2nd hour
+
+  // --- AI analysis (Google Gemini) ------------------------------------------
+  // OPTIONAL by design. With no key the analyser stays dormant and the rest of
+  // the app is unaffected — an AI outage or an unpaid bill must never be able to
+  // stop people logging their hours.
+  GEMINI_API_KEY: z.string().optional(),
+  GEMINI_MODEL: z.string().default('gemini-2.0-flash'),
+  /** Master switch, independent of the key, so it can be turned off in seconds. */
+  AI_ANALYSIS_ENABLED: bool(true),
+  /** How far back each run looks. Matches the cron cadence. */
+  AI_ANALYSIS_WINDOW_HOURS: int(2, 1),
+  /** Hard ceiling on one request, so a bad day cannot become a bad invoice. */
+  AI_MAX_EMPLOYEES_PER_RUN: int(60, 1),
+  AI_REQUEST_TIMEOUT_MS: int(30000, 1000),
 
   // --- seed ----------------------------------------------------------------
   SEED_ADMIN_EMAIL: z.string().email().default('admin@ara-workbench.local'),

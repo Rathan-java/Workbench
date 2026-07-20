@@ -38,6 +38,7 @@ import TaskIcon from '@mui/icons-material/EditCalendarOutlined';
 import AssignmentIcon from '@mui/icons-material/AssignmentOutlined';
 import MonitorIcon from '@mui/icons-material/MonitorHeartOutlined';
 import ApprovalIcon from '@mui/icons-material/FactCheckOutlined';
+import InsightsIcon from '@mui/icons-material/AutoAwesomeOutlined';
 import AccountTreeIcon from '@mui/icons-material/AccountTreeOutlined';
 import PeopleIcon from '@mui/icons-material/PeopleAltOutlined';
 import GroupsIcon from '@mui/icons-material/GroupsOutlined';
@@ -101,6 +102,12 @@ const NAV_SECTIONS = [
         label: 'Monitor',
         to: '/monitor',
         icon: MonitorIcon,
+        permission: PERMISSIONS.DASHBOARD_TEAM,
+      },
+      {
+        label: 'AI Insights',
+        to: '/insights',
+        icon: InsightsIcon,
         permission: PERMISSIONS.DASHBOARD_TEAM,
       },
       {

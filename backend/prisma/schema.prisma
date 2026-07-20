@@ -197,6 +197,9 @@ enum NotificationType {
   ASSIGNMENT_SUBMITTED
   ASSIGNMENT_COMPLETED
   ASSIGNMENT_REOPENED
+  /// The AI analyser found something. Two audiences, deliberately different
+  /// wording: leads/management get the finding, the employee gets a nudge.
+  AI_WORK_ALIGNMENT
   ACCOUNT
   SYSTEM
 }
@@ -213,6 +216,35 @@ enum ProjectStatus {
   ON_HOLD
   COMPLETED
   ARCHIVED
+}
+
+/// A module is a PLANNED piece of a project, so unlike a logged hour it has a
+/// genuine lifecycle. See design note 2: status is wrong on an entry (work
+/// already done) and right here (work still ahead).
+enum ModuleStatus {
+  PENDING
+  IN_PROGRESS
+  COMPLETED
+}
+
+/// What the AI concluded about a person's two-hour window.
+enum InsightKind {
+  /// Hours logged do not match what the assignment actually asks for.
+  MISALIGNED
+  /// Nothing logged, or filler, while assignments sit open.
+  IDLE
+  /// Logging hours, but the described work is thin against the requirement.
+  LOW_SUBSTANCE
+  /// Assignment is at risk of its due date.
+  AT_RISK
+  /// Work matches the assignment. Recorded so the trail is not only negative.
+  ON_TRACK
+}
+
+enum InsightSeverity {
+  INFO
+  WARNING
+  CRITICAL
 }
 
 // ---------------------------------------------------------------------------
@@ -252,6 +284,7 @@ model Department {
   assignments      Assignment[]
   rollups          DailyProductivityRollup[]
   holidays         Holiday[]
+  aiInsights       AiInsight[]
 
   @@index([isActive, sortOrder])
   @@map("departments")
@@ -416,6 +449,8 @@ model User {
   notifications         Notification[]
   rollups               DailyProductivityRollup[]
   settingsChanged       SystemSetting[]
+  aiInsights            AiInsight[]               @relation("InsightSubject")
+  insightsAcknowledged  AiInsight[]               @relation("InsightAcknowledgedBy")
 
   @@index([departmentId, status])
   @@index([teamId, status])
@@ -453,13 +488,52 @@ model Project {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
-  department  Department   @relation(fields: [departmentId], references: [id], onDelete: Restrict)
+  department  Department      @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   entries     TaskEntry[]
   assignments Assignment[]
+  modules     ProjectModule[]
 
   @@unique([departmentId, code])
   @@index([departmentId, status])
   @@map("projects")
+}
+
+/// THE PARTS A PROJECT IS MADE OF, and how far each has got.
+///
+/// This is the "project requirement" the AI measures work against: an assignment
+/// names the module it advances, an hour names the assignment, so a logged hour
+/// resolves all the way up to a deliverable. Without this level the AI can only
+/// ask "did you work on the project?" — with it, it can ask the question that
+/// matters: "did this hour move the part that is actually behind?"
+///
+/// Status lives here (unlike on an entry) because a module is work still ahead.
+model ProjectModule {
+  id        String @id @default(cuid())
+  projectId String
+
+  name        String  @db.VarChar(120)
+  description String? @db.Text
+
+  status    ModuleStatus @default(PENDING)
+  sortOrder Int          @default(0)
+
+  /// Retired rather than deleted once work has been logged against it, for the
+  /// same reason every other retirement in this schema is soft.
+  isActive Boolean @default(true)
+
+  /// Set when status first reaches COMPLETED — the only honest "when was this
+  /// finished", as opposed to inferring it from updatedAt.
+  completedAt DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  project     Project      @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  assignments Assignment[]
+
+  @@unique([projectId, name])
+  @@index([projectId, status])
+  @@map("project_modules")
 }
 
 // ---------------------------------------------------------------------------
@@ -709,6 +783,11 @@ model Assignment {
   /// off. Picking the assignment in the grid can therefore auto-fill projectId.
   projectId    String
 
+  /// WHICH PART of the project this advances. Optional, because not all work
+  /// belongs to a named module — but when present it is what lets the AI judge
+  /// an hour against a specific deliverable rather than the project at large.
+  moduleId     String?
+
   /// The employee the work is assigned TO. Nullable + SetNull — the assignment
   /// (and the hours logged against it) survives the assignee being deleted.
   assigneeId   String?
@@ -761,8 +840,9 @@ model Assignment {
 
   department Department @relation(fields: [departmentId], references: [id], onDelete: Restrict)
   team       Team?      @relation(fields: [teamId], references: [id], onDelete: SetNull)
-  project    Project    @relation(fields: [projectId], references: [id], onDelete: Restrict)
-  assignee   User?      @relation("AssignmentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
+  project    Project        @relation(fields: [projectId], references: [id], onDelete: Restrict)
+  module     ProjectModule? @relation(fields: [moduleId], references: [id], onDelete: SetNull)
+  assignee   User?          @relation("AssignmentAssignee", fields: [assigneeId], references: [id], onDelete: SetNull)
   assignedBy User?      @relation("AssignmentAssignedBy", fields: [assignedById], references: [id], onDelete: SetNull)
   reviewedBy User?      @relation("AssignmentReviewer", fields: [reviewedById], references: [id], onDelete: SetNull)
   createdBy  User?      @relation("AssignmentCreatedBy", fields: [createdById], references: [id], onDelete: SetNull)
@@ -770,6 +850,7 @@ model Assignment {
 
   entries     TaskEntry[]
   transitions AssignmentTransition[]
+  aiInsights  AiInsight[]
 
   @@index([departmentId, status])
   @@index([assigneeId, status])
@@ -971,6 +1052,81 @@ model DailyProductivityRollup {
   @@index([teamId, workDate])
   @@index([workDate])
   @@map("daily_productivity_rollups")
+}
+
+/// WHAT THE AI CONCLUDED, written down.
+///
+/// Every two hours the analyser compares what each person was ASSIGNED against
+/// what they actually LOGGED, and records the result here before anyone is
+/// notified. That ordering is the point: a model's judgement about someone's
+/// work is an accusation with consequences, so it lands in a durable, reviewable
+/// row — with the evidence it used and the model that said it — rather than
+/// existing only as a notification somebody half-remembers.
+///
+/// ON_TRACK findings are stored too. An insight table that only ever records
+/// problems reads as a charge sheet, and makes it impossible to tell "the AI
+/// checked and was satisfied" from "the AI never looked".
+model AiInsight {
+  id String @id @default(cuid())
+
+  /// The window analysed. Two hours by default, but stored rather than assumed
+  /// so a changed cadence does not silently reinterpret old rows.
+  windowStart DateTime
+  windowEnd   DateTime
+
+  departmentId String
+  teamId       String?
+
+  /// Nullable + name snapshot, like every other person reference here: the
+  /// finding outlives the account it was about.
+  userId   String?
+  userName String? @db.VarChar(160)
+
+  /// The assignment the finding is about, when it is about one.
+  assignmentId String?
+
+  kind     InsightKind
+  severity InsightSeverity @default(INFO)
+
+  /// 0-100, how well the logged hours match the assignment. Null when the AI
+  /// declined to score (too little evidence) — an absent score is honest; a
+  /// zero would be a verdict.
+  alignmentScore Int?
+
+  /// The assessment. VISIBLE TO TECH LEAD AND MANAGEMENT ONLY — the employee is
+  /// notified that something needs attention, never shown this text.
+  finding String @db.Text
+
+  /// What the lead could do about it. Optional; the AI is not always useful.
+  recommendation String? @db.Text
+
+  /// The hours and assignments the model was actually shown, so a disputed
+  /// finding can be audited against its inputs rather than re-litigated.
+  evidence Json?
+
+  /// Which model produced it. When results shift, this is the first question.
+  model String @db.VarChar(64)
+
+  /// Stops the same fact being raised every two hours forever — the same
+  /// discipline as the reminder job's dedupe key, enforced by the DATABASE so it
+  /// holds across instances.
+  dedupeKey String? @unique @db.VarChar(190)
+
+  acknowledgedById String?
+  acknowledgedAt   DateTime?
+
+  createdAt DateTime @default(now())
+
+  department     Department  @relation(fields: [departmentId], references: [id], onDelete: Cascade)
+  user           User?       @relation("InsightSubject", fields: [userId], references: [id], onDelete: SetNull)
+  assignment     Assignment? @relation(fields: [assignmentId], references: [id], onDelete: SetNull)
+  acknowledgedBy User?       @relation("InsightAcknowledgedBy", fields: [acknowledgedById], references: [id], onDelete: SetNull)
+
+  @@index([departmentId, createdAt])
+  @@index([userId, createdAt])
+  @@index([kind, severity])
+  @@index([createdAt])
+  @@map("ai_insights")
 }
 
 /// Distributed lock for node-cron.

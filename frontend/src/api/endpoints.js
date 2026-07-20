@@ -122,6 +122,17 @@ export const projects = {
    * never be deleted (409 INTERNAL_PROJECT_UNDELETABLE).
    */
   remove: (id) => client.delete(`/projects/${id}`),
+
+  /**
+   * The deliverables a project breaks down into. Returns retired modules too
+   * (`isActive: false`) — assignments still hang off them, so hiding them would
+   * orphan work that is visibly in flight.
+   */
+  listModules: (id) => client.get(`/projects/${id}/modules`),
+  addModule: (id, body) => client.post(`/projects/${id}/modules`, body),
+  updateModule: (id, moduleId, body) => client.patch(`/projects/${id}/modules/${moduleId}`, body),
+  /** Resolves to `{ retired: true }` when assignments reference it, `{ deleted: true }` otherwise. */
+  removeModule: (id, moduleId) => client.delete(`/projects/${id}/modules/${moduleId}`),
 };
 
 export const tasks = {
@@ -189,6 +200,18 @@ export const dashboard = {
    * teams against each other, so narrowing it to one is not a view it supports.
    */
   teamFollowUp: (params) => get('/dashboard/team-follow-up', params),
+};
+
+export const ai = {
+  /** { configured, enabled, hasKey, model, windowHours } — never the key itself. */
+  status: () => client.get('/ai/status'),
+  /** Params: { page, pageSize, departmentId, userId, kind, severity, unacknowledged, includeOnTrack } */
+  insights: (params) => get('/ai/insights', params),
+  acknowledge: (id) => client.post(`/ai/insights/${id}/acknowledge`),
+  /** Runs the two-hourly analysis immediately. Resolves to `{ summary }`. */
+  analyse: () => client.post('/ai/analyse'),
+  /** Round-trips the model to prove the key, the model name and the quota. */
+  ping: () => client.post('/ai/ping'),
 };
 
 const CONTENT_TYPES = {
@@ -322,6 +345,7 @@ const api = {
   projects,
   tasks,
   assignments,
+  ai,
   dashboard,
   reports,
   audit,

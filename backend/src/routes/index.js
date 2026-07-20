@@ -15,6 +15,7 @@ import dashboardRoutes from '../modules/dashboard/dashboard.routes.js';
 import reportRoutes from '../modules/reports/report.routes.js';
 import auditRoutes from '../modules/audit/audit.routes.js';
 import notificationRoutes from '../modules/notifications/notification.routes.js';
+import aiRoutes from '../modules/ai/ai.routes.js';
 import settingRoutes from '../modules/settings/setting.routes.js';
 import systemRoutes from './system.routes.js';
 
@@ -31,6 +32,7 @@ router.use('/dashboard', dashboardRoutes);
 router.use('/reports', reportRoutes);
 router.use('/audit', auditRoutes);
 router.use('/notifications', notificationRoutes);
+router.use('/ai', aiRoutes);
 router.use('/settings', settingRoutes);
 router.use('/system', systemRoutes);
 

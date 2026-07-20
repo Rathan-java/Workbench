@@ -1,11 +1,14 @@
 /**
  * Projects — the index every logged hour hangs off.
  *
- * There is exactly ONE level. A project has no modules, no epics, no
- * sub-anything: each extra level is one more dropdown an employee has to get
- * right at 6pm before they can go home, and the questions management actually
- * asks — how is this project going, who is on it, what did they do — are all
- * answerable from one level.
+ * For the person LOGGING an hour there is still exactly one level: the entry
+ * names a project and nothing else. Each extra required dropdown is one more
+ * thing to get right at 6pm before they can go home.
+ *
+ * Modules are the parts a project is made of, and they sit on the management
+ * side of that line: an assignment may name the module it advances, so the
+ * module's progress is derived from work that was already going to be recorded.
+ * Nobody is asked to classify their own hours into one.
  *
  * `TaskEntry.projectId` is NOT NULL, so every hour must name a project. That is
  * only an honest requirement because every department owns an "Internal /
@@ -43,7 +46,27 @@ const PROJECT_SELECT = {
   _count: { select: { entries: true } },
 };
 
-const toDto = ({ _count, ...p }) => ({ ...p, entryCount: _count.entries });
+const MODULE_SELECT = {
+  id: true,
+  name: true,
+  description: true,
+  status: true,
+  sortOrder: true,
+  isActive: true,
+  completedAt: true,
+  createdAt: true,
+  _count: { select: { assignments: true } },
+};
+
+const MODULE_ORDER = [{ sortOrder: 'asc' }, { name: 'asc' }];
+
+const toModuleDto = ({ _count, ...m }) => ({ ...m, assignmentCount: _count.assignments });
+
+const toDto = ({ _count, modules, ...p }) => ({
+  ...p,
+  entryCount: _count.entries,
+  ...(modules ? { modules: modules.map(toModuleDto) } : {}),
+});
 
 const SORTABLE = ['name', 'code', 'status', 'createdAt', 'startDate', 'endDate'];
 const SEARCHABLE = ['name', 'code', 'clientName', 'description'];
@@ -99,7 +122,15 @@ export const options = (scope, { departmentId } = {}) =>
   });
 
 export const getById = async (scope, id) => {
-  const project = await prisma.project.findUnique({ where: { id }, select: PROJECT_SELECT });
+  const project = await prisma.project.findUnique({
+    where: { id },
+    select: {
+      ...PROJECT_SELECT,
+      // Only on the single-project read: the drawer renders these, the list does
+      // not, and paying for them per row in `list` would be a needless join.
+      modules: { where: { isActive: true }, select: MODULE_SELECT, orderBy: MODULE_ORDER },
+    },
+  });
   if (!project) throw new NotFoundError('Project');
   assertCanActOn(scope, { departmentId: project.departmentId }, { allowSelf: false });
   return toDto(project);
@@ -271,4 +302,223 @@ export const destroy = async (scope, id) => {
   });
 
   return { id, deleted: true };
+};
+
+// ---------------------------------------------------------------------------
+// Modules — the parts a project is made of
+//
+// There is no MODULE_* audit action (AuditAction is a real DB enum and an
+// invented value throws), so module changes are audited as PROJECT_UPDATED with
+// the module named in the summary.
+// ---------------------------------------------------------------------------
+
+const loadProjectForModules = async (scope, projectId) => {
+  const project = await prisma.project.findUnique({
+    where: { id: projectId },
+    select: { id: true, name: true, departmentId: true },
+  });
+  if (!project) throw new NotFoundError('Project');
+  assertCanActOn(scope, { departmentId: project.departmentId }, { allowSelf: false });
+  return project;
+};
+
+const loadModule = async (projectId, moduleId) => {
+  const module = await prisma.projectModule.findFirst({
+    where: { id: moduleId, projectId },
+    select: MODULE_SELECT,
+  });
+  if (!module) throw new NotFoundError('Module');
+  return module;
+};
+
+/**
+ * Retired modules are included: they still hold assignments and hours, and a
+ * manager looking at the list needs to see where that work went. `isActive`
+ * tells the UI to render them as retired rather than offer them for new work.
+ */
+export const listModules = async (scope, projectId) => {
+  await loadProjectForModules(scope, projectId);
+
+  const modules = await prisma.projectModule.findMany({
+    where: { projectId },
+    select: MODULE_SELECT,
+    orderBy: MODULE_ORDER,
+  });
+  if (!modules.length) return [];
+
+  // Hours land on the assignment, not the module, so the count has to come back
+  // through the assignments. One extra query for the whole page, not one each.
+  const assignments = await prisma.assignment.findMany({
+    where: { moduleId: { in: modules.map((m) => m.id) } },
+    select: { moduleId: true, _count: { select: { entries: true } } },
+  });
+
+  const loggedByModule = new Map();
+  for (const a of assignments) {
+    loggedByModule.set(a.moduleId, (loggedByModule.get(a.moduleId) ?? 0) + a._count.entries);
+  }
+
+  return modules.map((m) => ({ ...toModuleDto(m), loggedEntryCount: loggedByModule.get(m.id) ?? 0 }));
+};
+
+export const addModule = async (scope, projectId, input) => {
+  const project = await loadProjectForModules(scope, projectId);
+
+  const clash = await prisma.projectModule.findFirst({
+    where: { projectId, name: input.name },
+    select: { id: true, isActive: true },
+  });
+  if (clash) {
+    throw new ConflictError(
+      clash.isActive
+        ? `"${project.name}" already has a module called "${input.name}".`
+        : `"${input.name}" already exists on "${project.name}" but has been retired. Rename this one, or reactivate the existing module so its history stays attached.`,
+      { code: 'MODULE_NAME_TAKEN', details: { moduleId: clash.id, isActive: clash.isActive } },
+    );
+  }
+
+  let sortOrder = input.sortOrder;
+  if (sortOrder === undefined) {
+    const last = await prisma.projectModule.findFirst({
+      where: { projectId },
+      orderBy: { sortOrder: 'desc' },
+      select: { sortOrder: true },
+    });
+    sortOrder = (last?.sortOrder ?? -1) + 1;
+  }
+
+  const module = await prisma.$transaction(async (tx) => {
+    const createdModule = await tx.projectModule.create({
+      data: {
+        projectId,
+        name: input.name,
+        description: input.description || null,
+        sortOrder,
+      },
+      select: MODULE_SELECT,
+    });
+
+    await audit.recordInTransaction(tx, {
+      action: 'PROJECT_UPDATED',
+      entityType: 'ProjectModule',
+      entityId: createdModule.id,
+      departmentId: project.departmentId,
+      summary: `Module "${createdModule.name}" added to project "${project.name}"`,
+      after: { name: createdModule.name, status: createdModule.status, sortOrder: createdModule.sortOrder },
+    });
+
+    return createdModule;
+  });
+
+  return toModuleDto(module);
+};
+
+export const updateModule = async (scope, projectId, moduleId, input) => {
+  const project = await loadProjectForModules(scope, projectId);
+  const before = await loadModule(projectId, moduleId);
+
+  if (input.name && input.name !== before.name) {
+    const clash = await prisma.projectModule.findFirst({
+      where: { projectId, name: input.name, id: { not: moduleId } },
+      select: { id: true },
+    });
+    if (clash) {
+      throw new ConflictError(`"${project.name}" already has a module called "${input.name}".`, {
+        code: 'MODULE_NAME_TAKEN',
+        details: { moduleId: clash.id },
+      });
+    }
+  }
+
+  /**
+   * `completedAt` is the honest answer to "when was this finished", so it is
+   * derived from the status transition and never accepted from the client. If
+   * the module is reopened the old date is cleared rather than kept — a
+   * completion date on something still in progress is a lie the reports believe.
+   */
+  let completedAt;
+  if (input.status && input.status !== before.status) {
+    completedAt = input.status === 'COMPLETED' ? new Date() : null;
+  }
+
+  const module = await prisma.$transaction(async (tx) => {
+    const updated = await tx.projectModule.update({
+      where: { id: moduleId },
+      data: {
+        name: input.name,
+        description: input.description !== undefined ? input.description || null : undefined,
+        status: input.status,
+        sortOrder: input.sortOrder,
+        completedAt,
+      },
+      select: MODULE_SELECT,
+    });
+
+    const { before: b, after: a } = audit.diff(before, updated);
+    if (Object.keys(a).length) {
+      const summary =
+        input.status && input.status !== before.status
+          ? `Module "${updated.name}" marked ${updated.status} on project "${project.name}"`
+          : `Module "${updated.name}" updated on project "${project.name}"`;
+
+      await audit.recordInTransaction(tx, {
+        action: 'PROJECT_UPDATED',
+        entityType: 'ProjectModule',
+        entityId: moduleId,
+        departmentId: project.departmentId,
+        summary,
+        before: b,
+        after: a,
+      });
+    }
+    return updated;
+  });
+
+  return toModuleDto(module);
+};
+
+/**
+ * Remove a module — soft once anything has been assigned against it.
+ *
+ * `Assignment.moduleId` is `SetNull`, so a hard delete would not fail: it would
+ * quietly cut every assignment loose from the deliverable it was advancing, and
+ * nothing would ever be able to say which part of the project that work was for.
+ * A module with assignments behind it is therefore retired (`isActive = false`):
+ * it stops being offered for new work and every link it holds survives.
+ *
+ * A module created by mistake, with nothing pointing at it, can simply go.
+ */
+export const removeModule = async (scope, projectId, moduleId) => {
+  const project = await loadProjectForModules(scope, projectId);
+  const module = await loadModule(projectId, moduleId);
+  const assignmentCount = module._count.assignments;
+
+  await prisma.$transaction(async (tx) => {
+    await audit.recordInTransaction(tx, {
+      action: 'PROJECT_UPDATED',
+      entityType: 'ProjectModule',
+      entityId: moduleId,
+      departmentId: project.departmentId,
+      summary: assignmentCount
+        ? `Module "${module.name}" retired on project "${project.name}" (${assignmentCount} assignments kept)`
+        : `Module "${module.name}" deleted from project "${project.name}". It had no assignments.`,
+      before: { name: module.name, status: module.status, assignmentCount },
+    });
+
+    if (assignmentCount > 0) {
+      await tx.projectModule.update({ where: { id: moduleId }, data: { isActive: false } });
+    } else {
+      await tx.projectModule.delete({ where: { id: moduleId } });
+    }
+  });
+
+  if (assignmentCount > 0) {
+    return {
+      id: moduleId,
+      retired: true,
+      message: `"${module.name}" has ${assignmentCount} ${assignmentCount === 1 ? 'assignment' : 'assignments'} behind it, so it has been retired rather than deleted. It will no longer be offered for new work, and the existing assignments and their hours are untouched.`,
+    };
+  }
+
+  return { id: moduleId, deleted: true };
 };

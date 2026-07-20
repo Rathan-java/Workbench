@@ -34,12 +34,19 @@ import PageHeader from '../../components/common/PageHeader.jsx';
 import Guard from '../../components/common/Guard.jsx';
 import { useDebounce } from '../../hooks/useDebounce.js';
 import { dashboard as dashboardApi, projects as projectsApi } from '../../api/endpoints.js';
-import { DEFAULT_PAGE_SIZE, PERMISSIONS, PROJECT_STATUS, PROJECT_STATUSES } from '../../utils/constants.js';
+import {
+  DEFAULT_PAGE_SIZE,
+  MODULE_STATUS,
+  MODULE_STATUSES,
+  PERMISSIONS,
+  PROJECT_STATUS,
+  PROJECT_STATUSES,
+} from '../../utils/constants.js';
 import { formatApiDate, formatDate, formatNumber } from '../../utils/format.js';
 
 import DepartmentChip from './components/DepartmentChip.jsx';
 import ToneChip from './components/ToneChip.jsx';
-import { PROJECT_STATUS_TONE } from './components/tones.js';
+import { MODULE_STATUS_TONE, PROJECT_STATUS_TONE } from './components/tones.js';
 import FilterBar, { SearchField, SelectFilter } from './components/FilterBar.jsx';
 import { useDepartments } from './components/useDepartments.js';
 import { errorMessage, isActionable } from './components/apiError.js';
@@ -525,6 +532,15 @@ function ProjectDrawer({ projectId, onClose, onEdit }) {
               </Box>
             </Stack>
 
+            {/* The catch-all has no deliverables to break down — it is where
+                meetings and admin go, and "Module 1 of Non-project" is nonsense. */}
+            {!project.isInternal && (
+              <>
+                <Divider />
+                <ProjectModules projectId={project.id} />
+              </>
+            )}
+
             {project.isInternal && (
               <>
                 <Divider />
@@ -550,6 +566,221 @@ function ProjectDrawer({ projectId, onClose, onEdit }) {
         )}
       </Box>
     </Drawer>
+  );
+}
+
+/* ------------------------------------------------------------------ *
+ * Modules — the deliverables a project breaks into
+ * ------------------------------------------------------------------ */
+
+/**
+ * A module is what a project is actually delivered in: assignments hang off one,
+ * and the hours logged against those assignments roll up here. That roll-up is
+ * the point of the section — it turns "this project has 400 hours" into "and 300
+ * of them went into a module still marked Pending".
+ */
+function ProjectModules({ projectId }) {
+  const queryClient = useQueryClient();
+  const { enqueueSnackbar } = useSnackbar();
+  const confirm = useConfirm();
+
+  const [newName, setNewName] = useState('');
+
+  const modulesQuery = useQuery({
+    queryKey: ['project-modules', projectId],
+    queryFn: () => projectsApi.listModules(projectId).then((res) => res.data),
+  });
+
+  const modules = modulesQuery.data ?? [];
+
+  const refresh = () => {
+    queryClient.invalidateQueries({ queryKey: ['project-modules', projectId] });
+    // The drawer's own query carries the active modules alongside the project.
+    queryClient.invalidateQueries({ queryKey: ['project', projectId] });
+  };
+
+  const addMutation = useMutation({
+    mutationFn: (name) => projectsApi.addModule(projectId, { name }),
+    onSuccess: () => {
+      setNewName('');
+      refresh();
+      enqueueSnackbar('Module added', { variant: 'success' });
+    },
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const statusMutation = useMutation({
+    mutationFn: ({ moduleId, status }) => projectsApi.updateModule(projectId, moduleId, { status }),
+    onSuccess: refresh,
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const removeMutation = useMutation({
+    mutationFn: (moduleId) => projectsApi.removeModule(projectId, moduleId),
+    onSuccess: (res) => {
+      refresh();
+      // The API says which of the two things happened; repeating its wording is
+      // the only way the admin learns that a retired module is still there.
+      enqueueSnackbar(res.message ?? 'Module removed', { variant: 'success' });
+    },
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const handleRemove = async (module) => {
+    const hasWork = (module.assignmentCount ?? 0) > 0;
+
+    const confirmed = await confirm({
+      title: `Remove "${module.name}"?`,
+      message: hasWork
+        ? `This module has ${formatNumber(module.assignmentCount)} assignment(s) behind it, so it will be retired rather than deleted — the work keeps its module and every logged hour survives.`
+        : 'Nothing is assigned to this module, so it will be deleted outright. This cannot be undone.',
+      confirmLabel: hasWork ? 'Retire' : 'Delete',
+      destructive: !hasWork,
+    });
+
+    if (confirmed) removeMutation.mutate(module.id);
+  };
+
+  const trimmedName = newName.trim();
+
+  return (
+    <Box>
+      <Stack direction="row" alignItems="center" spacing={1} sx={{ mb: 1 }}>
+        <Typography variant="subtitle2">Modules</Typography>
+        {modules.length > 0 && (
+          <Typography variant="caption" color="text.disabled">
+            {modules.length}
+          </Typography>
+        )}
+      </Stack>
+
+      {modulesQuery.isError && (
+        <Alert severity="error" sx={{ mb: 1.5 }}>
+          {errorMessage(modulesQuery.error, 'Could not load this project’s modules.')}
+        </Alert>
+      )}
+
+      {!modulesQuery.isLoading && modules.length === 0 && (
+        <Typography variant="body2" color="text.secondary" sx={{ mb: 1.5 }}>
+          No modules yet. Break the project into the pieces it is delivered in, and every assignment
+          can name the one it advances.
+        </Typography>
+      )}
+
+      <Stack spacing={1}>
+        {modules.map((module) => (
+          <Box
+            key={module.id}
+            sx={{
+              p: 1.25,
+              borderRadius: 1.5,
+              border: (theme) => `1px solid ${theme.palette.divider}`,
+              opacity: module.isActive === false ? 0.6 : 1,
+            }}
+          >
+            <Stack direction="row" alignItems="flex-start" spacing={1}>
+              <Box sx={{ minWidth: 0, flex: 1 }}>
+                <Typography variant="body2" fontWeight={500}>
+                  {module.name}
+                </Typography>
+
+                {module.description && (
+                  <Typography variant="caption" color="text.secondary" display="block">
+                    {module.description}
+                  </Typography>
+                )}
+
+                <Stack direction="row" spacing={0.75} sx={{ mt: 0.75 }} flexWrap="wrap" useFlexGap>
+                  <ToneChip
+                    tone={MODULE_STATUS_TONE[module.status]}
+                    label={MODULE_STATUS[module.status] ?? module.status}
+                  />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${formatNumber(module.assignmentCount ?? 0)} assigned`}
+                  />
+                  <Chip
+                    size="small"
+                    variant="outlined"
+                    label={`${formatNumber(module.loggedEntryCount ?? 0)} hours`}
+                  />
+                  {module.isActive === false && (
+                    <ToneChip tone="neutral" label="Retired" variant="outlined" />
+                  )}
+                </Stack>
+              </Box>
+
+              <Guard permission={PERMISSIONS.PROJECT_MANAGE}>
+                <Stack direction="row" spacing={0.5} alignItems="center">
+                  <TextField
+                    select
+                    size="small"
+                    label="Status"
+                    value={module.status}
+                    disabled={module.isActive === false || statusMutation.isPending}
+                    onChange={(event) =>
+                      statusMutation.mutate({ moduleId: module.id, status: event.target.value })
+                    }
+                    sx={{ width: 138 }}
+                  >
+                    {MODULE_STATUSES.map((option) => (
+                      <MenuItem key={option.value} value={option.value}>
+                        {option.label}
+                      </MenuItem>
+                    ))}
+                  </TextField>
+
+                  <Tooltip title="Remove this module">
+                    <span>
+                      <IconButton
+                        size="small"
+                        color="error"
+                        disabled={removeMutation.isPending}
+                        onClick={() => handleRemove(module)}
+                        aria-label={`Remove module ${module.name}`}
+                      >
+                        <DeleteIcon fontSize="small" />
+                      </IconButton>
+                    </span>
+                  </Tooltip>
+                </Stack>
+              </Guard>
+            </Stack>
+          </Box>
+        ))}
+      </Stack>
+
+      <Guard permission={PERMISSIONS.PROJECT_MANAGE}>
+        <Stack
+          component="form"
+          direction="row"
+          spacing={1}
+          sx={{ mt: 1.5 }}
+          onSubmit={(event) => {
+            event.preventDefault();
+            if (trimmedName) addMutation.mutate(trimmedName);
+          }}
+        >
+          <TextField
+            size="small"
+            fullWidth
+            label="New module"
+            value={newName}
+            onChange={(event) => setNewName(event.target.value)}
+            disabled={addMutation.isPending}
+          />
+          <Button
+            type="submit"
+            variant="outlined"
+            startIcon={<AddIcon />}
+            disabled={!trimmedName || addMutation.isPending}
+          >
+            Add
+          </Button>
+        </Stack>
+      </Guard>
+    </Box>
   );
 }
 

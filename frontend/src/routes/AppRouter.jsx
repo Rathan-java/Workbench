@@ -36,6 +36,7 @@ const TaskSheet = lazy(() => import('../features/tasks/TaskSheetPage.jsx'));
 const Assignments = lazy(() => import('../features/assignments/AssignmentsPage.jsx'));
 const AssignmentDetail = lazy(() => import('../features/assignments/AssignmentDetailPage.jsx'));
 const Monitor = lazy(() => import('../features/monitor/MonitorPage.jsx'));
+const Insights = lazy(() => import('../features/insights/InsightsPage.jsx'));
 const Approvals = lazy(() => import('../features/approvals/ApprovalsPage.jsx'));
 const Reports = lazy(() => import('../features/reports/ReportsPage.jsx'));
 const Profile = lazy(() => import('../features/profile/ProfilePage.jsx'));
@@ -185,6 +186,17 @@ export default function AppRouter() {
             element={
               <RequirePermission permission={PERMISSIONS.DASHBOARD_TEAM}>
                 <Monitor />
+              </RequirePermission>
+            }
+          />
+          {/* DASHBOARD_TEAM, the same gate the API uses: findings are read by the
+              people who can act on them. An employee is notified; they never
+              read the assessment itself. */}
+          <Route
+            path="/insights"
+            element={
+              <RequirePermission permission={PERMISSIONS.DASHBOARD_TEAM}>
+                <Insights />
               </RequirePermission>
             }
           />
