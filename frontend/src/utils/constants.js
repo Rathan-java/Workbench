@@ -83,6 +83,7 @@ export const INSIGHT_KIND = Object.freeze({
   IDLE: 'Idle',
   LOW_SUBSTANCE: 'Low Substance',
   AT_RISK: 'At Risk',
+  NO_PROGRESS: 'No Progress',
   ON_TRACK: 'On Track',
 });
 export const INSIGHT_KINDS = Object.freeze(toOptions(INSIGHT_KIND));

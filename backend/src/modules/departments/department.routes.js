@@ -64,6 +64,7 @@ const createSchema = z.object({
   sortOrder: z.number().int().min(0).max(999).optional(),
   requiredSlotsPerDay: z.number().int().min(1).max(24).default(7),
   workingWeekdays: z.array(z.number().int().min(1).max(7)).min(1).max(7).default([1, 2, 3, 4, 5]),
+  aiAnalysisEnabled: z.boolean().default(true),
   timeSlots: z.array(timeSlotSchema).max(24).optional(),
   fields: z.array(fieldSchema).max(30).optional(),
 });
@@ -77,6 +78,25 @@ const updateSchema = z.object({
   sortOrder: z.number().int().min(0).max(999),
   requiredSlotsPerDay: z.number().int().min(1).max(24),
   workingWeekdays: z.array(z.number().int().min(1).max(7)).min(1).max(7),
+  // Optional, not required: an older client that omits it leaves the setting
+  // untouched rather than defaulting analysis back on.
+  aiAnalysisEnabled: z.boolean().optional(),
+});
+
+/**
+ * The logging cadence. Every field is optional: an administrator changing only
+ * the interval should not have to restate the working day they are happy with.
+ * `breakStartMinute: null` is meaningful — it removes the break — which is why
+ * these are nullable rather than merely absent.
+ */
+const minuteOfDay = z.number().int().min(0).max(1440);
+const cadenceSchema = z.object({
+  slotIntervalMinutes: z.number().int().min(15).max(480).optional(),
+  dayStartMinute: minuteOfDay.optional(),
+  dayEndMinute: minuteOfDay.optional(),
+  breakStartMinute: minuteOfDay.nullable().optional(),
+  breakEndMinute: minuteOfDay.nullable().optional(),
+  dryRun: z.boolean().optional().default(false),
 });
 
 /**
@@ -204,6 +224,40 @@ router
  *       201: { description: Column added }
  *       409: { description: Overlaps an existing column }
  */
+/**
+ * @openapi
+ * /departments/{id}/time-slots/rebuild:
+ *   post:
+ *     tags: [Departments]
+ *     summary: Regenerate the grid columns from a working day and a logging interval
+ *     description: |
+ *       Management's control over how often employees must describe what they
+ *       completed: every 1, 2 or 3 hours (any interval from 15 minutes to 8 hours).
+ *
+ *       Send `dryRun: true` to get the exact plan — the columns it would produce,
+ *       and which existing ones would be retired — without writing anything. The
+ *       preview is computed by the same planner as the write.
+ *
+ *       Columns carrying logged work are RETIRED, never deleted. Overtime columns
+ *       are untouched.
+ *     responses:
+ *       200: { description: Rebuilt, or the plan when dryRun }
+ *       400: { description: The working day, interval or break is not usable }
+ */
+router.post(
+  '/:id/time-slots/rebuild',
+  authorize(PERMISSIONS.DEPARTMENT_MANAGE),
+  validate({ params: idParam, body: cadenceSchema }),
+  asyncHandler(async (req, res) => {
+    const result = await service.rebuildTimeSlots(req.params.id, req.body, req.user);
+    return ok(res, result, {
+      message: result.applied
+        ? `Working hours rebuilt — ${result.requiredSlotsPerDay} columns of ${result.interval} minutes`
+        : 'Preview only — nothing has been changed',
+    });
+  }),
+);
+
 router.post(
   '/:id/time-slots',
   authorize(PERMISSIONS.DEPARTMENT_MANAGE),

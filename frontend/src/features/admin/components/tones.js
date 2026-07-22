@@ -76,6 +76,7 @@ export const INSIGHT_KIND_TONE = {
   IDLE: 'amber',
   LOW_SUBSTANCE: 'warning',
   AT_RISK: 'warning',
+  NO_PROGRESS: 'amber',
   ON_TRACK: 'success',
 };
 

@@ -8,6 +8,7 @@ import Alert from '@mui/material/Alert';
 import Box from '@mui/material/Box';
 import Button from '@mui/material/Button';
 import Checkbox from '@mui/material/Checkbox';
+import Chip from '@mui/material/Chip';
 import Dialog from '@mui/material/Dialog';
 import DialogActions from '@mui/material/DialogActions';
 import DialogContent from '@mui/material/DialogContent';
@@ -160,6 +161,7 @@ function DetailsTab({ department, onDeleteRequest }) {
       sortOrder: department.sortOrder ?? 0,
       requiredSlotsPerDay: department.requiredSlotsPerDay ?? 7,
       workingWeekdays: department.workingWeekdays ?? [1, 2, 3, 4, 5],
+      aiAnalysisEnabled: department.aiAnalysisEnabled ?? true,
     },
   });
 
@@ -176,6 +178,7 @@ function DetailsTab({ department, onDeleteRequest }) {
         sortOrder: values.sortOrder,
         requiredSlotsPerDay: values.requiredSlotsPerDay,
         workingWeekdays: values.workingWeekdays,
+        aiAnalysisEnabled: values.aiAnalysisEnabled,
       }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: departmentConfigKey(department.id) });
@@ -317,6 +320,27 @@ function DetailsTab({ department, onDeleteRequest }) {
           )}
         />
 
+        {/* A data-sharing decision, so it says plainly what it does. Switching it
+            off excludes this department from the analyser's query entirely — the
+            work is never read, not merely hidden after the fact. */}
+        <Controller
+          name="aiAnalysisEnabled"
+          control={control}
+          render={({ field }) => (
+            <FormControlLabel
+              control={<Switch {...field} checked={field.value} size="small" />}
+              label={
+                <Typography variant="body2">
+                  AI analysis —{' '}
+                  {field.value
+                    ? "this department's assignments and hour descriptions are sent to the analyser"
+                    : 'switched off. Nothing from this department is sent to the AI at all.'}
+                </Typography>
+              }
+            />
+          )}
+        />
+
         <Typography variant="caption" color="text.disabled">
           The code <strong>{department.code}</strong> is immutable — integrations and seeds resolve
           this department by it.
@@ -352,6 +376,185 @@ function DetailsTab({ department, onDeleteRequest }) {
 /* ------------------------------------------------------------------ *
  * Working hours
  * ------------------------------------------------------------------ */
+
+/**
+ * How often employees must describe what they completed.
+ *
+ * The two-step is the whole design: PREVIEW, then apply. Changing a live
+ * department's grid is not a text edit — it can retire columns that people have
+ * already logged work against, and it re-labels others. The server computes the
+ * preview with the same planner it uses to write, so what is shown here is
+ * exactly what will happen, not an approximation of it.
+ */
+function CadencePanel({ department, onApplied }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const confirm = useConfirm();
+
+  const [intervalMinutes, setIntervalMinutes] = useState(department.slotIntervalMinutes ?? 60);
+  const [dayStart, setDayStart] = useState(minutesToTime(department.dayStartMinute ?? 600));
+  const [dayEnd, setDayEnd] = useState(minutesToTime(department.dayEndMinute ?? 1080));
+  const [plan, setPlan] = useState(null);
+
+  const body = () => ({
+    slotIntervalMinutes: Number(intervalMinutes),
+    dayStartMinute: timeToMinutes(dayStart),
+    dayEndMinute: timeToMinutes(dayEnd),
+  });
+
+  const previewMutation = useMutation({
+    mutationFn: () => departmentsApi.rebuildTimeSlots(department.id, { ...body(), dryRun: true }),
+    onSuccess: (res) => setPlan(res.data),
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const applyMutation = useMutation({
+    mutationFn: () => departmentsApi.rebuildTimeSlots(department.id, body()),
+    onSuccess: (res) => {
+      setPlan(null);
+      onApplied?.();
+      enqueueSnackbar(res.message ?? 'Working hours rebuilt', { variant: 'success' });
+    },
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const handleApply = async () => {
+    // Only ask when something irreversible-looking is actually going to happen.
+    // A confirmation on a harmless change teaches people to click through the
+    // one that matters.
+    const losing = plan?.retired?.length ?? 0;
+    const moving = plan?.adjusted?.length ?? 0;
+    if (losing || moving) {
+      const parts = [];
+      if (losing) parts.push(`${losing} column${losing > 1 ? 's' : ''} carrying logged work will be retired — the work stays, the column leaves the grid`);
+      if (moving) parts.push(`${moving} column${moving > 1 ? 's' : ''} with logged work will be re-labelled to its new span`);
+      const confirmed = await confirm({
+        title: 'Rebuild this department’s working hours?',
+        message: `${parts.join('. ')}. No task entry is ever deleted.`,
+        confirmLabel: 'Rebuild',
+      });
+      if (!confirmed) return;
+    }
+    applyMutation.mutate();
+  };
+
+  const dirty =
+    Number(intervalMinutes) !== (department.slotIntervalMinutes ?? 60) ||
+    timeToMinutes(dayStart) !== (department.dayStartMinute ?? 600) ||
+    timeToMinutes(dayEnd) !== (department.dayEndMinute ?? 1080);
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2 }}>
+      <Typography variant="subtitle2" gutterBottom>
+        Logging cadence
+      </Typography>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+        How often people in this department describe what they have completed. Longer blocks suit
+        work that cannot be summarised every hour.
+      </Typography>
+
+      <Stack direction={{ xs: 'column', sm: 'row' }} spacing={2} sx={{ mb: 1.5 }}>
+        <TextField
+          select
+          size="small"
+          label="Log every"
+          value={intervalMinutes}
+          onChange={(e) => {
+            setIntervalMinutes(e.target.value);
+            setPlan(null);
+          }}
+          sx={{ minWidth: 140 }}
+        >
+          {[30, 60, 120, 180, 240].map((m) => (
+            <MenuItem key={m} value={m}>
+              {m < 60 ? `${m} minutes` : `${m / 60} hour${m > 60 ? 's' : ''}`}
+            </MenuItem>
+          ))}
+        </TextField>
+        <TextField
+          size="small"
+          type="time"
+          label="Day starts"
+          value={dayStart}
+          onChange={(e) => {
+            setDayStart(e.target.value);
+            setPlan(null);
+          }}
+          InputLabelProps={{ shrink: true }}
+        />
+        <TextField
+          size="small"
+          type="time"
+          label="Day ends"
+          value={dayEnd}
+          onChange={(e) => {
+            setDayEnd(e.target.value);
+            setPlan(null);
+          }}
+          InputLabelProps={{ shrink: true }}
+        />
+      </Stack>
+
+      <Stack direction="row" spacing={1} alignItems="center">
+        <Button
+          size="small"
+          variant="outlined"
+          onClick={() => previewMutation.mutate()}
+          disabled={previewMutation.isPending}
+        >
+          Preview the grid
+        </Button>
+        {plan && (
+          <Button
+            size="small"
+            variant="contained"
+            onClick={handleApply}
+            disabled={applyMutation.isPending}
+          >
+            Apply
+          </Button>
+        )}
+        {dirty && !plan && (
+          <Typography variant="caption" color="text.secondary">
+            Preview to see what changes before anything is written.
+          </Typography>
+        )}
+      </Stack>
+
+      {plan && (
+        <Box sx={{ mt: 1.5 }}>
+          <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 0.5 }}>
+            {plan.requiredSlotsPerDay} block{plan.requiredSlotsPerDay === 1 ? '' : 's'} to fill each day
+          </Typography>
+          <Stack direction="row" spacing={0.5} flexWrap="wrap" useFlexGap>
+            {plan.columns.map((c) => (
+              <Chip
+                key={c.label}
+                size="small"
+                label={c.label}
+                variant={c.isBreak ? 'outlined' : 'filled'}
+              />
+            ))}
+          </Stack>
+
+          {plan.retired?.length > 0 && (
+            <Alert severity="warning" sx={{ mt: 1.5 }}>
+              These columns carry logged work and will be <b>retired, not deleted</b> — they leave
+              the grid, the entries behind them stay:{' '}
+              {plan.retired.map((r) => `${r.label} (${r.entries})`).join(', ')}
+            </Alert>
+          )}
+          {plan.adjusted?.length > 0 && (
+            <Alert severity="warning" sx={{ mt: 1 }}>
+              These columns already have work logged against them and will be re-labelled to their
+              new span:{' '}
+              {plan.adjusted.map((a) => `${a.from} → ${a.to} (${a.entries})`).join(', ')}
+            </Alert>
+          )}
+        </Box>
+      )}
+    </Paper>
+  );
+}
 
 function WorkingHoursTab({ department }) {
   const queryClient = useQueryClient();
@@ -400,9 +603,13 @@ function WorkingHoursTab({ department }) {
   return (
     <Stack spacing={2}>
       <Alert severity="info" icon={false}>
-        These are the columns of this department&apos;s task grid — one row per hour, on every
+        These are the columns of this department&apos;s task grid — one block per entry, on every
         employee&apos;s sheet.
       </Alert>
+
+      <Guard permission={PERMISSIONS.DEPARTMENT_MANAGE}>
+        <CadencePanel department={department} onApplied={invalidate} />
+      </Guard>
 
       <Guard permission={PERMISSIONS.DEPARTMENT_MANAGE}>
         <Box>

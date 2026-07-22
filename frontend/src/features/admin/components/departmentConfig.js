@@ -184,6 +184,7 @@ export const departmentDetailsSchema = z.object({
 export const departmentEditSchema = departmentDetailsSchema.omit({ code: true }).extend({
   isActive: z.boolean(),
   sortOrder: z.coerce.number().int().min(0).max(999),
+  aiAnalysisEnabled: z.boolean(),
 });
 
 export const timeSlotSchema = z

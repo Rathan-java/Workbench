@@ -44,6 +44,7 @@ import { errorMessage } from './components/apiError.js';
 const CATEGORY_LABELS = {
   notifications: 'Notifications & reminders',
   tasks: 'Task entry',
+  ai: 'AI analysis',
 };
 
 export default function SettingsPage() {

@@ -26,6 +26,12 @@ const DEPARTMENT_SELECT = {
   sortOrder: true,
   requiredSlotsPerDay: true,
   workingWeekdays: true,
+  aiAnalysisEnabled: true,
+  slotIntervalMinutes: true,
+  dayStartMinute: true,
+  dayEndMinute: true,
+  breakStartMinute: true,
+  breakEndMinute: true,
 };
 
 /**
@@ -156,6 +162,9 @@ export const update = async (id, input) => {
       sortOrder: input.sortOrder,
       requiredSlotsPerDay: input.requiredSlotsPerDay,
       workingWeekdays: input.workingWeekdays,
+      // Absent from the payload means "leave it alone" — an older client that
+      // does not know about this field must not silently switch analysis back on.
+      aiAnalysisEnabled: input.aiAnalysisEnabled ?? undefined,
     },
     select: DEPARTMENT_SELECT,
   });
@@ -228,6 +237,7 @@ export const create = async (input, actor) => {
         sortOrder: input.sortOrder ?? 99,
         requiredSlotsPerDay: input.requiredSlotsPerDay,
         workingWeekdays: input.workingWeekdays,
+        aiAnalysisEnabled: input.aiAnalysisEnabled ?? true,
         timeSlots: {
           create: (input.timeSlots ?? []).map((slot, index) => ({
             // Derive the label from the minutes when the caller omits it. The
@@ -618,6 +628,264 @@ export const removeTimeSlot = async (departmentId, slotId) => {
 
   await prisma.timeSlot.delete({ where: { id: slotId } });
   return { id: slotId, deleted: true };
+};
+
+// ---------------------------------------------------------------------------
+// The logging cadence
+// ---------------------------------------------------------------------------
+
+/**
+ * Work out the columns a given working day and interval produce.
+ *
+ * Pure: no database, no side effects, so the preview an administrator approves
+ * and the rebuild that follows are computed by the same code. A preview produced
+ * by different logic from the write is not a preview, it is a guess.
+ */
+export const planTimeSlots = ({
+  dayStartMinute,
+  dayEndMinute,
+  slotIntervalMinutes,
+  breakStartMinute,
+  breakEndMinute,
+}) => {
+  const hasBreak =
+    Number.isInteger(breakStartMinute) &&
+    Number.isInteger(breakEndMinute) &&
+    breakEndMinute > breakStartMinute;
+
+  const blocks = [];
+  let cursor = dayStartMinute;
+  let guard = 0;
+
+  while (cursor < dayEndMinute) {
+    // A runaway here would write rows until the disk filled. The bounds below
+    // make it unreachable; this makes it unreachable twice.
+    if ((guard += 1) > 96) break;
+
+    if (hasBreak && cursor === breakStartMinute) {
+      blocks.push({ startMinute: breakStartMinute, endMinute: breakEndMinute, isBreak: true });
+      cursor = breakEndMinute;
+      continue;
+    }
+
+    let end = Math.min(cursor + slotIntervalMinutes, dayEndMinute);
+
+    // Never run a working block THROUGH the break: truncate at its start and let
+    // the next iteration emit the break itself. This is what allows an interval
+    // that does not divide the morning evenly — the short block lands before
+    // lunch, where it is legible, instead of swallowing it.
+    if (hasBreak && cursor < breakStartMinute && end > breakStartMinute) end = breakStartMinute;
+
+    blocks.push({ startMinute: cursor, endMinute: end, isBreak: false });
+    cursor = end;
+  }
+
+  return blocks.map((b, i) => ({
+    ...b,
+    sortOrder: i,
+    label: b.isBreak ? 'Lunch' : `${minutesToLabel(b.startMinute)} - ${minutesToLabel(b.endMinute)}`,
+  }));
+};
+
+const assertValidCadence = (c) => {
+  const { dayStartMinute: s, dayEndMinute: e, slotIntervalMinutes: i } = c;
+
+  if (!Number.isInteger(s) || !Number.isInteger(e) || s < 0 || e > 1440 || e <= s) {
+    throw new BadRequestError('The working day must start before it ends, within one calendar day', {
+      code: 'INVALID_WORKING_DAY',
+    });
+  }
+  if (!Number.isInteger(i) || i < 15 || i > 480) {
+    throw new BadRequestError('A logging block must be between 15 minutes and 8 hours', {
+      code: 'INVALID_INTERVAL',
+    });
+  }
+  const hasBreak = c.breakStartMinute != null || c.breakEndMinute != null;
+  if (hasBreak) {
+    if (!Number.isInteger(c.breakStartMinute) || !Number.isInteger(c.breakEndMinute)) {
+      throw new BadRequestError('A break needs both a start and an end', { code: 'INVALID_BREAK' });
+    }
+    if (c.breakEndMinute <= c.breakStartMinute || c.breakStartMinute < s || c.breakEndMinute > e) {
+      throw new BadRequestError('The break must fall inside the working day', {
+        code: 'INVALID_BREAK',
+      });
+    }
+  }
+};
+
+/**
+ * Regenerate a department's grid columns from its working day and interval.
+ *
+ * ── WHAT THIS WILL NOT DO ───────────────────────────────────────────────────
+ *
+ * It will not delete an hour that somebody has logged work against. A column
+ * the new layout has no place for is RETIRED (isActive: false), exactly as
+ * removeTimeSlot does: it stops appearing on new sheets, and every entry behind
+ * it stays readable, exportable and attributable. Only genuinely empty columns
+ * are deleted. That is what makes this safe to run on a live department — the
+ * worst case is a tidier grid and some retired history, never lost work.
+ *
+ * Columns that survive unchanged are MATCHED, not recreated, so their ids hold
+ * and today's entries keep pointing at the same row.
+ *
+ * Overtime columns are left completely alone: they sit beyond the working day by
+ * definition, they are added by employees rather than administrators, and
+ * sweeping them up here would delete an hour somebody worked late to log.
+ *
+ * @param {string} departmentId
+ * @param {object} input cadence + `dryRun`
+ */
+export const rebuildTimeSlots = async (departmentId, input, actor) => {
+  const department = await prisma.department.findUnique({
+    where: { id: departmentId },
+    select: DEPARTMENT_SELECT,
+  });
+  if (!department) throw new NotFoundError('Department');
+
+  const cadence = {
+    dayStartMinute: input.dayStartMinute ?? department.dayStartMinute,
+    dayEndMinute: input.dayEndMinute ?? department.dayEndMinute,
+    slotIntervalMinutes: input.slotIntervalMinutes ?? department.slotIntervalMinutes,
+    breakStartMinute:
+      input.breakStartMinute === undefined ? department.breakStartMinute : input.breakStartMinute,
+    breakEndMinute:
+      input.breakEndMinute === undefined ? department.breakEndMinute : input.breakEndMinute,
+  };
+  assertValidCadence(cadence);
+
+  const planned = planTimeSlots(cadence);
+  const working = planned.filter((p) => !p.isBreak);
+  if (!working.length) {
+    throw new BadRequestError('That working day and interval produce no hours to log', {
+      code: 'EMPTY_GRID',
+    });
+  }
+
+  const existing = await prisma.timeSlot.findMany({
+    where: { departmentId, isOvertime: false },
+    select: {
+      id: true,
+      label: true,
+      startMinute: true,
+      endMinute: true,
+      isBreak: true,
+      isActive: true,
+      _count: { select: { entries: true } },
+    },
+  });
+
+  /**
+   * Rows are matched by START TIME, not by the whole span — because the schema
+   * says `@@unique([departmentId, startMinute])`. A department has at most one
+   * column beginning at 10:00, ever, active or retired. So "retire 10:00-11:00
+   * and create 10:00-12:00" is not a thing the database will allow; the row that
+   * starts at 10:00 is re-spanned in place.
+   */
+  const byStart = new Map(existing.map((s) => [s.startMinute, s]));
+  const plannedStarts = new Set(planned.map((p) => p.startMinute));
+
+  const reused = [];   // same start, same span — nothing changes but the ordering
+  const adjusted = []; // same start, DIFFERENT span — the column is re-spanned
+  const created = [];
+
+  for (const p of planned) {
+    const match = byStart.get(p.startMinute);
+    if (!match) created.push(p);
+    else if (match.endMinute === p.endMinute && match.isBreak === p.isBreak) reused.push({ match, p });
+    else adjusted.push({ match, p });
+  }
+
+  const orphans = existing.filter((s) => !plannedStarts.has(s.startMinute));
+  const toRetire = orphans.filter((s) => s._count.entries > 0 && s.isActive);
+  const toDelete = orphans.filter((s) => s._count.entries === 0);
+
+  const summary = {
+    interval: cadence.slotIntervalMinutes,
+    day: `${minutesToLabel(cadence.dayStartMinute)} - ${minutesToLabel(cadence.dayEndMinute)}`,
+    columns: planned.map((p) => ({ label: p.label, isBreak: p.isBreak })),
+    requiredSlotsPerDay: working.length,
+    unchanged: reused.length,
+    created: created.length,
+    deleted: toDelete.length,
+    retired: toRetire.map((s) => ({ label: s.label, entries: s._count.entries })),
+    /**
+     * Surfaced separately, and deliberately: an existing column that carries
+     * logged work and is being re-spanned means an hour somebody already
+     * recorded will afterwards be labelled with a different span. No entry is
+     * lost, but the label above it changes, and an administrator should be told
+     * that before they press the button rather than discover it in a report.
+     */
+    adjusted: adjusted
+      .filter(({ match }) => match._count.entries > 0)
+      .map(({ match, p }) => ({ from: match.label, to: p.label, entries: match._count.entries })),
+  };
+
+  // A preview runs the real planner and the real diff, and then stops.
+  if (input.dryRun) return { ...summary, applied: false };
+
+  await prisma.$transaction(async (tx) => {
+    if (toDelete.length) {
+      await tx.timeSlot.deleteMany({ where: { id: { in: toDelete.map((s) => s.id) } } });
+    }
+    if (toRetire.length) {
+      await tx.timeSlot.updateMany({
+        where: { id: { in: toRetire.map((s) => s.id) } },
+        data: { isActive: false },
+      });
+    }
+    for (const { match, p } of [...reused, ...adjusted]) {
+      await tx.timeSlot.update({
+        where: { id: match.id },
+        data: {
+          label: p.label,
+          endMinute: p.endMinute,
+          isBreak: p.isBreak,
+          sortOrder: p.sortOrder,
+          isActive: true,
+        },
+      });
+    }
+    for (const p of created) {
+      await tx.timeSlot.create({
+        data: {
+          departmentId,
+          label: p.label,
+          startMinute: p.startMinute,
+          endMinute: p.endMinute,
+          isBreak: p.isBreak,
+          sortOrder: p.sortOrder,
+        },
+      });
+    }
+    await tx.department.update({
+      where: { id: departmentId },
+      data: {
+        ...cadence,
+        // The requirement follows the grid. Leaving it at 7 after halving the
+        // number of columns would mark every single employee non-compliant
+        // forever, and nobody would connect it to this change.
+        requiredSlotsPerDay: working.length,
+      },
+    });
+  });
+
+  audit.record({
+    action: 'DEPARTMENT_UPDATED',
+    entityType: 'Department',
+    entityId: departmentId,
+    summary: `Logging cadence for "${department.name}" set to every ${cadence.slotIntervalMinutes} minutes (${summary.day}) — ${working.length} columns`,
+    before: {
+      slotIntervalMinutes: department.slotIntervalMinutes,
+      dayStartMinute: department.dayStartMinute,
+      dayEndMinute: department.dayEndMinute,
+      requiredSlotsPerDay: department.requiredSlotsPerDay,
+    },
+    after: { ...cadence, requiredSlotsPerDay: working.length },
+    actorId: actor?.id,
+  });
+
+  logger.info('Time slots rebuilt', { departmentId, ...summary });
+  return { ...summary, applied: true };
 };
 
 // ---------------------------------------------------------------------------
