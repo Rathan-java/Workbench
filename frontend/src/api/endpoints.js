@@ -53,6 +53,12 @@ export const departments = {
   /** 204 on success; 409 DEPARTMENT_NOT_EMPTY if it still holds people or work. */
   remove: (id) => client.delete(`/departments/${id}`),
 
+  /**
+   * Regenerate the grid columns from a working day + logging interval.
+   * Pass `dryRun: true` for the plan without the write — same planner, so the
+   * preview an administrator approves is the change they get.
+   */
+  rebuildTimeSlots: (id, body) => client.post(`/departments/${id}/time-slots/rebuild`, body),
   addTimeSlot: (id, body) => client.post(`/departments/${id}/time-slots`, body),
   /**
    * The "+" at the end of the task grid. Appends the next hour after the
@@ -128,6 +134,10 @@ export const projects = {
    * (`isActive: false`) — assignments still hang off them, so hiding them would
    * orphan work that is visibly in flight.
    */
+  /** Everyone who can be given work on this project, members first, each with hours logged. */
+  assignable: (id) => client.get(`/projects/${id}/assignable`),
+  addMember: (id, userId) => client.post(`/projects/${id}/members`, { userId }),
+  removeMember: (id, userId) => client.delete(`/projects/${id}/members/${userId}`),
   listModules: (id) => client.get(`/projects/${id}/modules`),
   addModule: (id, body) => client.post(`/projects/${id}/modules`, body),
   updateModule: (id, moduleId, body) => client.patch(`/projects/${id}/modules/${moduleId}`, body),
@@ -210,6 +220,8 @@ export const ai = {
   acknowledge: (id) => client.post(`/ai/insights/${id}/acknowledge`),
   /** Runs the two-hourly analysis immediately. Resolves to `{ summary }`. */
   analyse: () => client.post('/ai/analyse'),
+  /** On-demand efficiency review of one department over N days. Management only. */
+  review: (body) => client.post('/ai/review', body),
   /** Round-trips the model to prove the key, the model name and the quota. */
   ping: () => client.post('/ai/ping'),
 };

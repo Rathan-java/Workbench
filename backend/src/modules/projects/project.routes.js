@@ -215,6 +215,76 @@ router
  *       201: { description: Module created }
  *       409: { description: A module of that name already exists on the project }
  */
+/**
+ * @openapi
+ * /projects/{id}/assignable:
+ *   get:
+ *     tags: [Projects]
+ *     summary: Who can be given work on this project, and who is already on it
+ *     description: |
+ *       Returns every active person in the project's department, members first,
+ *       each flagged `isMember` with the hours they have logged against it.
+ *
+ *       Deliberately NOT filtered to members only: a new project has no members
+ *       by definition, and a members-only list would make it impossible to put
+ *       the first person on it.
+ *     responses:
+ *       200: { description: Assignable people, members first }
+ */
+router.get(
+  '/:id/assignable',
+  authorize(PERMISSIONS.ASSIGNMENT_READ),
+  validate({ params: idParam }),
+  asyncHandler(async (req, res) => ok(res, await service.listAssignable(req.scope, req.params.id))),
+);
+
+/**
+ * @openapi
+ * /projects/{id}/members:
+ *   post:
+ *     tags: [Projects]
+ *     summary: Put somebody on this project
+ *     description: Idempotent. Refuses anyone outside the project's department.
+ *     responses:
+ *       200: { description: Added, or already a member }
+ *       400: { description: Wrong department, or the account is not active }
+ */
+router.post(
+  '/:id/members',
+  authorize(PERMISSIONS.ASSIGNMENT_CREATE),
+  validate({ params: idParam, body: z.object({ userId: z.string().cuid() }) }),
+  asyncHandler(async (req, res) => {
+    const result = await service.addMember(req.scope, req.params.id, req.body.userId, req.user);
+    return ok(res, result, {
+      message: result.alreadyMember ? 'Already on this project' : 'Added to the project',
+    });
+  }),
+);
+
+/**
+ * @openapi
+ * /projects/{id}/members/{userId}:
+ *   delete:
+ *     tags: [Projects]
+ *     summary: Take somebody off this project
+ *     description: |
+ *       Removes the membership only. Every hour they logged and every assignment
+ *       they hold stay exactly as they are — membership is a statement about now,
+ *       not a record of what was done.
+ *     responses:
+ *       200: { description: Removed }
+ */
+router.delete(
+  '/:id/members/:userId',
+  authorize(PERMISSIONS.PROJECT_MANAGE),
+  validate({ params: idParam.extend({ userId: z.string().cuid() }) }),
+  asyncHandler(async (req, res) =>
+    ok(res, await service.removeMember(req.scope, req.params.id, req.params.userId, req.user), {
+      message: 'Removed from the project',
+    }),
+  ),
+);
+
 router
   .route('/:id/modules')
   .get(

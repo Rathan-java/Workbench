@@ -50,6 +50,7 @@ const LIST_INCLUDE = {
   assignee: { select: { id: true, firstName: true, lastName: true, avatarPath: true, employeeCode: true } },
   assignedBy: { select: { id: true, firstName: true, lastName: true } },
   project: { select: { id: true, code: true, name: true } },
+  module: { select: { id: true, name: true, status: true } },
   department: { select: { id: true, name: true, colorHex: true } },
   _count: { select: { entries: true } },
 };
@@ -99,6 +100,8 @@ const baseDto = (a) => {
     departmentId: a.departmentId,
     department: a.department ?? null,
     project: a.project ?? null,
+    /** The deliverable this work rolls up to, or null when the project has no modules. */
+    module: a.module ?? null,
     assignee: a.assignee
       ? { id: a.assignee.id, fullName: fullName(a.assignee), avatarPath: a.assignee.avatarPath, employeeCode: a.assignee.employeeCode }
       : { id: null, fullName: a.assigneeName ?? 'Former employee', avatarPath: null, employeeCode: a.assigneeCode ?? null },
@@ -227,6 +230,7 @@ export const listActiveForUser = async (scope, userId) => {
       dueDate: true,
       projectId: true,
       project: { select: { id: true, code: true, name: true } },
+      module: { select: { id: true, name: true } },
     },
     orderBy: [{ priority: 'desc' }, { dueDate: 'asc' }, { createdAt: 'asc' }],
   });
@@ -239,6 +243,7 @@ export const listActiveForUser = async (scope, userId) => {
     dueDate: a.dueDate ? formatWorkDate(a.dueDate) : null,
     projectId: a.projectId,
     project: a.project,
+    module: a.module ?? null,
     isOverdue: !!a.dueDate && toWorkDate(a.dueDate) < todayDate(),
   }));
 };
@@ -263,6 +268,35 @@ const assertProjectInDepartment = async (projectId, departmentId) => {
     throw new BadRequestError(`Project "${project.name}" is no longer active`, { code: 'PROJECT_INACTIVE' });
   }
   return project;
+};
+
+/**
+ * A module belongs to exactly one project, so pointing an assignment at a module
+ * from a DIFFERENT project would quietly corrupt every roll-up that walks
+ * hour → assignment → module → project. Checked against the project we have
+ * already proven is in the caller's department, so this needs no scope check of
+ * its own.
+ *
+ * A retired module (isActive=false) is refused for NEW work: retiring it is the
+ * lead saying "stop assigning against this". Existing assignments keep pointing
+ * at it — the record of what was worked on must not be rewritten.
+ */
+const assertModuleInProject = async (moduleId, projectId) => {
+  const module = await prisma.projectModule.findUnique({
+    where: { id: moduleId },
+    select: { id: true, projectId: true, name: true, isActive: true },
+  });
+  if (!module || module.projectId !== projectId) {
+    throw new BadRequestError('That module does not belong to the selected project', {
+      code: 'MODULE_PROJECT_MISMATCH',
+    });
+  }
+  if (!module.isActive) {
+    throw new BadRequestError(`Module "${module.name}" has been retired and cannot take new work`, {
+      code: 'MODULE_RETIRED',
+    });
+  }
+  return module;
 };
 
 export const create = async (scope, user, input) => {
@@ -292,17 +326,38 @@ export const create = async (scope, user, input) => {
   });
 
   await assertProjectInDepartment(input.projectId, assignee.departmentId);
+  if (input.moduleId) await assertModuleInProject(input.moduleId, input.projectId);
 
   if (input.dueDate && toWorkDate(input.dueDate) < todayDate()) {
     throw new BadRequestError('The due date cannot be in the past', { code: 'DUE_DATE_IN_PAST' });
   }
 
   const created = await prisma.$transaction(async (tx) => {
+    /**
+     * "This person is not on the project — add them?" answered yes.
+     *
+     * Done INSIDE the same transaction as the assignment, deliberately. Two
+     * separate calls can half-succeed, and the half that fails is invisible: you
+     * would end up with somebody holding work on a project they are still not a
+     * member of, which is exactly the confusion this feature exists to remove.
+     *
+     * createMany + skipDuplicates rather than a check-then-insert: the unique
+     * index decides, so two managers assigning the same person at the same
+     * moment cannot race each other into an error.
+     */
+    if (input.addToProject) {
+      await tx.projectMember.createMany({
+        data: [{ projectId: input.projectId, userId: assignee.id, addedById: user.id }],
+        skipDuplicates: true,
+      });
+    }
+
     const assignment = await tx.assignment.create({
       data: {
         departmentId: assignee.departmentId,
         teamId: assignee.teamId,
         projectId: input.projectId,
+        moduleId: input.moduleId || null,
         assigneeId: assignee.id,
         assigneeName: fullName(assignee),
         assigneeCode: assignee.employeeCode,
@@ -368,7 +423,7 @@ export const create = async (scope, user, input) => {
 export const update = async (scope, user, id, input) => {
   const before = await prisma.assignment.findUnique({
     where: { id },
-    select: { id: true, title: true, description: true, priority: true, dueDate: true, estimatedHours: true, status: true, departmentId: true, version: true },
+    select: { id: true, title: true, description: true, priority: true, dueDate: true, estimatedHours: true, status: true, departmentId: true, projectId: true, moduleId: true, version: true },
   });
   if (!before) throw new NotFoundError('Assignment');
   assertCanActOn(scope, { departmentId: before.departmentId }, { allowSelf: false });
@@ -389,12 +444,17 @@ export const update = async (scope, user, id, input) => {
     throw new BadRequestError('The due date cannot be in the past', { code: 'DUE_DATE_IN_PAST' });
   }
 
+  // Validated against the assignment's OWN project — the project is immutable
+  // after creation, so there is no window where the pair could disagree.
+  if (input.moduleId) await assertModuleInProject(input.moduleId, before.projectId);
+
   const updated = await prisma.$transaction(async (tx) => {
     const row = await tx.assignment.update({
       where: { id },
       data: {
         title: input.title,
         description: input.description !== undefined ? input.description || null : undefined,
+        moduleId: input.moduleId !== undefined ? input.moduleId || null : undefined,
         priority: input.priority,
         dueDate: input.dueDate !== undefined ? (input.dueDate ? toWorkDate(input.dueDate) : null) : undefined,
         estimatedHours: input.estimatedHours !== undefined ? input.estimatedHours : undefined,
@@ -405,8 +465,8 @@ export const update = async (scope, user, id, input) => {
     });
 
     const { before: b, after: a } = audit.diff(
-      { title: before.title, description: before.description, priority: before.priority, dueDate: before.dueDate, estimatedHours: before.estimatedHours },
-      { title: row.title, description: row.description, priority: row.priority, dueDate: row.dueDate, estimatedHours: row.estimatedHours },
+      { title: before.title, description: before.description, priority: before.priority, dueDate: before.dueDate, estimatedHours: before.estimatedHours, moduleId: before.moduleId },
+      { title: row.title, description: row.description, priority: row.priority, dueDate: row.dueDate, estimatedHours: row.estimatedHours, moduleId: row.moduleId },
     );
     if (Object.keys(a).length) {
       await audit.recordInTransaction(tx, {

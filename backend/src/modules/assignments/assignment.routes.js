@@ -40,6 +40,18 @@ const listQuery = paginationSchema.extend({
 const createSchema = z.object({
   assigneeId: z.string().cuid(),
   projectId: z.string().cuid(),
+  // Which deliverable of that project this work belongs to. Optional: not every
+  // project is broken into modules, and forcing one would push leads to invent
+  // filler. When present it is what lets the AI reason from an hour all the way
+  // up to a deliverable.
+  moduleId: z.string().cuid().optional().nullable(),
+  /**
+   * Put the assignee on the project as part of creating this assignment.
+   * Set by the dialog when a manager confirms "they are not on this project —
+   * add them?". Default false: assigning work is not, on its own, a decision to
+   * change who is staffed on a project.
+   */
+  addToProject: z.boolean().optional().default(false),
   title: z.string().trim().min(ASSIGNMENT_TITLE_MIN).max(ASSIGNMENT_TITLE_MAX),
   description: z.string().trim().max(ASSIGNMENT_DESCRIPTION_MAX).optional().or(z.literal('')),
   priority: z.enum(ASSIGNMENT_PRIORITY_LIST).default(ASSIGNMENT_PRIORITY.NORMAL),
@@ -50,6 +62,10 @@ const createSchema = z.object({
 /** Reassigning and moving departments are deliberately absent — an assignment's
  *  assignee and department are fixed at creation, like a TaskEntry's owner. */
 const updateSchema = z.object({
+  // Re-pointing an assignment at a different module is a legitimate correction;
+  // null detaches it. The project itself is never re-pointed — that would move
+  // logged hours between projects.
+  moduleId: z.string().cuid().optional().nullable(),
   title: z.string().trim().min(ASSIGNMENT_TITLE_MIN).max(ASSIGNMENT_TITLE_MAX).optional(),
   description: z.string().trim().max(ASSIGNMENT_DESCRIPTION_MAX).optional().nullable().or(z.literal('')),
   priority: z.enum(ASSIGNMENT_PRIORITY_LIST).optional(),

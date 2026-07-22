@@ -27,6 +27,7 @@ import { scopedWhereWithFilters, assertCanActOn } from '../../core/accessScope.j
 import { and, buildOrderBy, buildSearchFilter, toPrismaPage } from '../../core/pagination.js';
 import { NotFoundError, BadRequestError, ConflictError } from '../../core/errors.js';
 import * as audit from '../audit/audit.service.js';
+import { fullName } from '../../utils/name.js';
 
 const PROJECT_SELECT = {
   id: true,
@@ -329,6 +330,130 @@ const loadModule = async (projectId, moduleId) => {
   });
   if (!module) throw new NotFoundError('Module');
   return module;
+};
+
+// ---------------------------------------------------------------------------
+// Project membership — who is on this project
+// ---------------------------------------------------------------------------
+
+/**
+ * Everyone who could be given work on this project, and whether they are on it.
+ *
+ * This deliberately returns the WHOLE department rather than only the members.
+ * A strict filter reads well until the first new project, whose member list is
+ * empty by definition — at which point nobody can be assigned to it, and the
+ * most ordinary reason to open the dialog (putting somebody onto a project) is
+ * the one thing it cannot do.
+ *
+ * So: members first, everyone else after, and the caller is told which is which.
+ * The signal is in the ordering, not in what has been hidden.
+ */
+export const listAssignable = async (scope, projectId) => {
+  const project = await loadProjectForModules(scope, projectId);
+
+  const people = await prisma.user.findMany({
+    where: {
+      // Membership never crosses a department boundary — that is the isolation
+      // model, and a project belongs to exactly one department.
+      departmentId: project.departmentId,
+      status: 'ACTIVE',
+      role: { in: ['EMPLOYEE', 'TECH_LEAD'] },
+    },
+    select: {
+      id: true,
+      firstName: true,
+      lastName: true,
+      employeeCode: true,
+      role: true,
+      projectMemberships: { where: { projectId }, select: { id: true } },
+      _count: { select: { taskEntries: { where: { projectId } } } },
+    },
+    orderBy: [{ firstName: 'asc' }, { lastName: 'asc' }],
+  });
+
+  return people
+    .map((u) => ({
+      id: u.id,
+      fullName: fullName(u),
+      employeeCode: u.employeeCode,
+      role: u.role,
+      isMember: u.projectMemberships.length > 0,
+      hoursLogged: u._count.taskEntries,
+    }))
+    // Members first, then by who has actually put hours in. A manager scanning
+    // this list wants the people already on the work at the top of it.
+    .sort(
+      (a, b) =>
+        Number(b.isMember) - Number(a.isMember) ||
+        b.hoursLogged - a.hoursLogged ||
+        a.fullName.localeCompare(b.fullName),
+    );
+};
+
+/** Add somebody to a project. Idempotent — the unique index makes it safe to repeat. */
+export const addMember = async (scope, projectId, userId, actor) => {
+  const project = await loadProjectForModules(scope, projectId);
+
+  const user = await prisma.user.findUnique({
+    where: { id: userId },
+    select: { id: true, firstName: true, lastName: true, departmentId: true, status: true },
+  });
+  if (!user) throw new NotFoundError('Employee');
+  if (user.status !== 'ACTIVE') {
+    throw new BadRequestError('That account is not active', { code: 'USER_INACTIVE' });
+  }
+  if (user.departmentId !== project.departmentId) {
+    throw new BadRequestError(
+      `${fullName(user)} is not in the department this project belongs to`,
+      { code: 'PROJECT_DEPARTMENT_MISMATCH' },
+    );
+  }
+
+  const existing = await prisma.projectMember.findUnique({
+    where: { projectId_userId: { projectId, userId } },
+    select: { id: true },
+  });
+  if (existing) return { added: false, alreadyMember: true };
+
+  await prisma.projectMember.create({
+    data: { projectId, userId, addedById: actor?.id ?? null },
+  });
+
+  audit.record({
+    action: 'PROJECT_UPDATED',
+    entityType: 'Project',
+    entityId: projectId,
+    summary: `${fullName(user)} added to project "${project.name}"`,
+    after: { memberAdded: fullName(user) },
+    actorId: actor?.id,
+  });
+
+  return { added: true, alreadyMember: false };
+};
+
+export const removeMember = async (scope, projectId, userId, actor) => {
+  const project = await loadProjectForModules(scope, projectId);
+
+  const member = await prisma.projectMember.findUnique({
+    where: { projectId_userId: { projectId, userId } },
+    select: { id: true, user: { select: { firstName: true, lastName: true } } },
+  });
+  if (!member) throw new NotFoundError('Project member');
+
+  await prisma.projectMember.delete({ where: { id: member.id } });
+
+  // Removing somebody from a project takes away nothing they did — their hours
+  // and assignments are untouched. Membership is a statement about now.
+  audit.record({
+    action: 'PROJECT_UPDATED',
+    entityType: 'Project',
+    entityId: projectId,
+    summary: `${fullName(member.user)} removed from project "${project.name}"`,
+    before: { member: fullName(member.user) },
+    actorId: actor?.id,
+  });
+
+  return { removed: true };
 };
 
 /**

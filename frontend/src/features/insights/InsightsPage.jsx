@@ -35,7 +35,9 @@ import LinearProgress from '@mui/material/LinearProgress';
 import Paper from '@mui/material/Paper';
 import Stack from '@mui/material/Stack';
 import Switch from '@mui/material/Switch';
+import Tab from '@mui/material/Tab';
 import TablePagination from '@mui/material/TablePagination';
+import Tabs from '@mui/material/Tabs';
 import Typography from '@mui/material/Typography';
 
 import AutoAwesomeIcon from '@mui/icons-material/AutoAwesomeOutlined';
@@ -50,7 +52,12 @@ import FilterBar, { SelectFilter } from '../admin/components/FilterBar.jsx';
 import ToneChip from '../admin/components/ToneChip.jsx';
 import { INSIGHT_KIND_TONE, INSIGHT_SEVERITY_TONE } from '../admin/components/tones.js';
 import { errorMessage } from '../admin/components/apiError.js';
-import { ai as aiApi } from '../../api/endpoints.js';
+import {
+  ai as aiApi,
+  departments as departmentsApi,
+  projects as projectsApi,
+  users as usersApi,
+} from '../../api/endpoints.js';
 import {
   DEFAULT_PAGE_SIZE,
   INSIGHT_KIND,
@@ -62,10 +69,185 @@ import {
 } from '../../utils/constants.js';
 import { formatDateTime, formatRelative } from '../../utils/format.js';
 
+/**
+ * The on-demand efficiency review.
+ *
+ * Deliberately a button rather than a schedule. A cron job quietly building a
+ * case file about somebody every night is a different product from a manager
+ * choosing to ask a question, and the second is the one worth having — it puts a
+ * person's name against the decision to look, and it makes the cost visible.
+ *
+ * Nobody is notified by a review. The result appears here, for the person who
+ * asked. An employee receiving "you have been reviewed" would learn only that
+ * they are under suspicion, which helps nobody.
+ */
+function ReviewRunner({ disabled, onDone }) {
+  const { enqueueSnackbar } = useSnackbar();
+  const [departmentId, setDepartmentId] = useState('');
+  const [projectId, setProjectId] = useState('');
+  const [userId, setUserId] = useState('');
+  const [days, setDays] = useState(10);
+  const [summary, setSummary] = useState(null);
+
+  const departmentsQuery = useQuery({
+    queryKey: ['departments'],
+    queryFn: () => departmentsApi.list().then((res) => res.data),
+    staleTime: 10 * 60 * 1000,
+  });
+  const departments = (departmentsQuery.data ?? []).filter((d) => d.isActive);
+
+  /**
+   * Both lists hang off the chosen department and are not fetched until there is
+   * one — an unfiltered project list would offer projects that the review would
+   * then reject as belonging elsewhere.
+   */
+  const projectsQuery = useQuery({
+    queryKey: ['projects', 'options', departmentId],
+    queryFn: () => projectsApi.options({ departmentId }).then((res) => res.data),
+    enabled: Boolean(departmentId),
+    staleTime: 5 * 60 * 1000,
+  });
+  const peopleQuery = useQuery({
+    queryKey: ['users', 'options', departmentId],
+    queryFn: () => usersApi.options({ departmentId }).then((res) => res.data),
+    enabled: Boolean(departmentId),
+    staleTime: 5 * 60 * 1000,
+  });
+
+  const projects = projectsQuery.data ?? [];
+  // Management accounts do not log hours, so offering them here would only
+  // produce a review with nothing in it.
+  const people = (peopleQuery.data ?? []).filter((u) => u.role !== 'MANAGEMENT');
+
+  // A project or a person from the previous department is a wrong answer, not a
+  // stale one — clear both the moment the department changes.
+  const changeDepartment = (id) => {
+    setDepartmentId(id);
+    setProjectId('');
+    setUserId('');
+  };
+
+  const reviewMutation = useMutation({
+    mutationFn: () =>
+      aiApi.review({ departmentId, days: Number(days), projectId: projectId || undefined, userId: userId || undefined }),
+    onSuccess: (res) => {
+      setSummary(res.data);
+      onDone?.();
+      enqueueSnackbar(res.message ?? 'Review complete', { variant: 'success', autoHideDuration: 8000 });
+    },
+    onError: (error) => enqueueSnackbar(errorMessage(error), { variant: 'error' }),
+  });
+
+  const selected = departments.find((d) => d.id === departmentId);
+  const optedOut = selected && selected.aiAnalysisEnabled === false;
+
+  return (
+    <Paper variant="outlined" sx={{ p: 2, mb: 2 }}>
+      <Typography variant="subtitle2">Run an efficiency review</Typography>
+      <Typography variant="caption" color="text.secondary" display="block" sx={{ mb: 1.5 }}>
+        Reads every active person in one department across a whole period at once — their daily log,
+        their assignments, and whether the modules that work belongs to have actually moved. This is
+        what finds the things a two-hour window cannot: the same task described three different ways
+        over a fortnight. Nobody is notified; the results appear below. Narrow it to one project or
+        one person if you have a specific question — leave both alone for the whole department.
+      </Typography>
+
+      <Stack
+        direction="row"
+        spacing={2}
+        rowGap={2}
+        alignItems="center"
+        flexWrap="wrap"
+        useFlexGap
+      >
+        <SelectFilter
+          label="Department"
+          value={departmentId}
+          onChange={changeDepartment}
+          options={departments.map((d) => ({ value: d.id, label: d.name }))}
+          allLabel="Choose a department"
+          width={230}
+        />
+        {/*
+          Optional, and they say so on their faces: "All projects" and "Everyone"
+          are the values they hold until somebody deliberately changes them.
+        */}
+        <SelectFilter
+          label="Project (optional)"
+          value={projectId}
+          onChange={setProjectId}
+          options={projects.map((p) => ({ value: p.id, label: p.name }))}
+          allLabel="All projects"
+          width={210}
+          disabled={!departmentId}
+        />
+        <SelectFilter
+          label="Employee (optional)"
+          value={userId}
+          onChange={setUserId}
+          options={people.map((u) => ({ value: u.id, label: u.fullName }))}
+          allLabel="Everyone"
+          width={210}
+          disabled={!departmentId}
+        />
+        <SelectFilter
+          label="Period"
+          value={days}
+          onChange={setDays}
+          options={[7, 10, 14, 30].map((d) => ({ value: d, label: `Last ${d} days` }))}
+          width={160}
+        />
+        <Button
+          variant="contained"
+          startIcon={<AutoAwesomeIcon />}
+          disabled={!departmentId || optedOut || disabled || reviewMutation.isPending}
+          onClick={() => reviewMutation.mutate()}
+        >
+          {reviewMutation.isPending ? 'Reviewing…' : 'Run AI detection'}
+        </Button>
+      </Stack>
+
+      {reviewMutation.isPending && <LinearProgress sx={{ mt: 1.5 }} />}
+
+      {optedOut && (
+        <Alert severity="info" sx={{ mt: 1.5 }}>
+          {selected.name} has AI analysis switched off, so nothing from it can be sent — on a
+          schedule or on request. Turn it on under Administration → Departments first.
+        </Alert>
+      )}
+
+      {summary && (
+        <Alert severity="info" sx={{ mt: 1.5 }} onClose={() => setSummary(null)}>
+          {summary.department}
+          {/*
+            The narrowing is repeated back deliberately. "0 flagged" means one
+            thing about a department and quite another about a single project
+            inside it, and the reader must not have to remember which they asked.
+          */}
+          {summary.scope?.project && ` · ${summary.scope.project}`}
+          {summary.scope?.employee && ` · ${summary.scope.employee}`}: {summary.assessed} assessed
+          over {summary.workingDays} working days ({summary.from} → {summary.to}).{' '}
+          <strong>{summary.flagged} flagged.</strong>
+          {summary.failed > 0 && ` ${summary.failed} could not be assessed.`}
+          {summary.assessed === 0 &&
+            ' Nobody matched — check that the project has people on it, or widen the review.'}
+        </Alert>
+      )}
+    </Paper>
+  );
+}
+
 export default function InsightsPage() {
   const queryClient = useQueryClient();
   const { enqueueSnackbar } = useSnackbar();
 
+  /**
+   * Two feeds, never mixed. "Live" is the scheduled analyser saying today is
+   * going wrong; "Reviews" is a manager having deliberately asked whether
+   * somebody has moved in a fortnight. Reading them as one list would let a
+   * two-week judgement pass for something that happened this afternoon.
+   */
+  const [mode, setMode] = useState('live');
   const [severity, setSeverity] = useState('');
   const [kind, setKind] = useState('');
   const [unacknowledged, setUnacknowledged] = useState(false);
@@ -83,8 +265,9 @@ export default function InsightsPage() {
       // the acknowledged ones, which is not what an unticked box means.
       unacknowledged: unacknowledged || undefined,
       includeOnTrack: includeOnTrack || undefined,
+      isReview: mode === 'review' || undefined,
     }),
-    [page, pageSize, severity, kind, unacknowledged, includeOnTrack],
+    [page, pageSize, severity, kind, unacknowledged, includeOnTrack, mode],
   );
 
   const statusQuery = useQuery({
@@ -134,6 +317,17 @@ export default function InsightsPage() {
 
   return (
     <Box>
+      <Tabs
+        value={mode}
+        onChange={(_e, value) => {
+          setMode(value);
+          setPage(1);
+        }}
+        sx={{ mb: 2 }}
+      >
+        <Tab value="live" label="Live findings" />
+        <Tab value="review" label="Period reviews" />
+      </Tabs>
       <PageHeader
         title="AI Insights"
         subtitle="Every two hours the analyser reads what each person was assigned and what they actually logged, and writes down anything that does not line up. Findings are for you to act on — the employee never sees them."
@@ -172,6 +366,28 @@ export default function InsightsPage() {
           AI analysis is configured ({status.model}) but currently disabled, so no new findings are
           being recorded.
         </Alert>
+      )}
+
+      {/* "Nothing flagged for Video Editing" means one of two very different
+          things: the analyser looked and found nothing, or it was never allowed
+          to look. A manager acts differently on each, so name the departments. */}
+      {status?.departmentsOptedOut?.length > 0 && (
+        <Alert severity="info" sx={{ mb: 2 }}>
+          Not analysed:{' '}
+          <strong>{status.departmentsOptedOut.map((d) => d.name).join(', ')}</strong>. Nothing from{' '}
+          {status.departmentsOptedOut.length === 1 ? 'this department' : 'these departments'} is sent
+          to the AI, so they will never appear below. Change this per department under
+          Administration → Departments.
+        </Alert>
+      )}
+
+      {mode === 'review' && (
+        <Guard permission={PERMISSIONS.SETTINGS_MANAGE}>
+          <ReviewRunner
+            disabled={notConfigured}
+            onDone={() => queryClient.invalidateQueries({ queryKey: ['ai', 'insights'] })}
+          />
+        </Guard>
       )}
 
       <FilterBar onReset={resetFilters} canReset={hasFilters}>
