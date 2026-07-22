@@ -165,7 +165,10 @@ export const runJobNow = async (name) => {
   const job = JOBS.find((j) => j.name === name);
   if (!job) throw new Error(`Unknown job: ${name}`);
   logger.info('Job triggered manually', { job: name });
-  return job.run();
+  // `force` matters to the cadence-gated jobs: an administrator pressing "run
+  // now" means now, not "at the next scheduled opportunity". Jobs that take no
+  // options ignore it.
+  return job.run({ force: true });
 };
 
 export const JOB_NAMES = JOBS.map((j) => j.name);

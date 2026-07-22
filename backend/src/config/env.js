@@ -117,7 +117,21 @@ const schema = z.object({
   CRON_LEAD_DIGEST: z.string().default('30 13,18 * * 1-5'),
   CRON_MANAGEMENT_SUMMARY: z.string().default('0 19 * * 1-5'),
   CRON_AUTO_APPROVE: z.string().default('40 * * * *'), // :40 every hour
-  CRON_AI_ANALYSIS: z.string().default('10 */2 * * *'), // :10 every 2nd hour
+  /**
+   * :10 hourly DURING WORKING HOURS, weekdays only.
+   *
+   * This is the job's WAKE-UP schedule, not its cadence. How often the analysis
+   * actually runs is a runtime setting Management controls (ai.analysis.
+   * intervalHours); the job wakes on this schedule and returns immediately
+   * unless that many hours have passed. Waking is free — only the API call
+   * costs — and a fixed expression means a cadence change takes effect without
+   * a redeploy and without every instance having to be told.
+   *
+   * Restricted to working hours because a 03:00 run cannot find anything a 09:00
+   * run will not: nothing happened in between. All it would produce is a metered
+   * call and an "IDLE" finding about somebody's night.
+   */
+  CRON_AI_ANALYSIS: z.string().default('10 9-19 * * 1-5'),
 
   // --- AI analysis (Google Gemini) ------------------------------------------
   // OPTIONAL by design. With no key the analyser stays dormant and the rest of

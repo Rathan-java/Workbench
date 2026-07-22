@@ -184,6 +184,13 @@ export const SETTING_KEY = Object.freeze({
   /** A submitted sheet nobody reviews auto-approves after this many hours. */
   AUTO_APPROVE_ENABLED: 'tasks.autoApprove.enabled',
   AUTO_APPROVE_HOURS: 'tasks.autoApprove.hours',
+  /**
+   * How often the AI analyser runs, in hours. Management's single lever over
+   * what the analyser costs: the job wakes hourly but only works once this many
+   * hours have passed, and the window it reads always matches, so raising this
+   * number cuts API calls proportionally without leaving gaps in coverage.
+   */
+  AI_ANALYSIS_INTERVAL_HOURS: 'ai.analysis.intervalHours',
 });
 
 /** The grace period, in minutes. Overridable in Settings; this is the fallback. */

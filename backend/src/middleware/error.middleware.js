@@ -23,7 +23,12 @@ const translatePrisma = (error) => {
   if (error instanceof Prisma.PrismaClientKnownRequestError) {
     switch (error.code) {
       case 'P2002': {
-        const fields = /** @type {string[]} */ (error.meta?.target) ?? [];
+        // `meta.target` is an array of column names on PostgreSQL but a single
+        // STRING (the index name) on MySQL. Assuming the array shape turned every
+        // duplicate-key conflict into a 500 with an HTML error page — the clean
+        // 409 this branch exists to produce never reached the client.
+        const raw = error.meta?.target;
+        const fields = Array.isArray(raw) ? raw : typeof raw === 'string' ? [raw] : [];
         const label = fields.filter((f) => f !== 'id').join(', ') || 'value';
         return new ConflictError(`A record with this ${label} already exists`, {
           code: 'DUPLICATE_RECORD',

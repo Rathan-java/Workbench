@@ -14,7 +14,7 @@
  */
 import { prisma } from '../../config/prisma.js';
 import { SETTING_KEY } from '../../config/constants.js';
-import { NotFoundError } from '../../core/errors.js';
+import { NotFoundError, BadRequestError } from '../../core/errors.js';
 import * as audit from '../audit/audit.service.js';
 import { logger } from '../../config/logger.js';
 import { fullName } from '../../utils/name.js';
@@ -99,6 +99,20 @@ const DEFAULTS = Object.freeze({
     category: 'tasks',
     description:
       'Hours a submitted sheet waits for review before it auto-approves. The clock starts at submission and resets if the sheet is sent back and resubmitted.',
+    validate: (v) => Number.isInteger(v) && v >= 1 && v <= 168,
+  },
+  [SETTING_KEY.AI_ANALYSIS_INTERVAL_HOURS]: {
+    // The single lever over what the analyser costs. The job wakes hourly during
+    // working hours but only does anything once this many hours have passed, and
+    // the window it reads always matches this number — so raising it cuts API
+    // calls proportionally WITHOUT leaving hours unexamined. Bounded at 1 (an
+    // hourly cadence is the most anyone could defend paying for) and at 12 (past
+    // a working day it is no longer monitoring, it is a daily report).
+    value: 2,
+    category: 'ai',
+    description:
+      'How often the AI work-alignment analyser runs, in hours. The window it examines always matches, so no logged hour goes unexamined. Raising this is the most direct way to reduce AI cost.',
+    validate: (v) => Number.isInteger(v) && v >= 1 && v <= 12,
   },
 });
 
@@ -178,6 +192,15 @@ export const set = async (key, value, actor) => {
 
   const before = await prisma.systemSetting.findUnique({ where: { key } });
   const def = DEFAULTS[key];
+
+  // A known key is not the same as a sane value. Without this, "analyse every 0
+  // hours" is accepted and the job runs on every single tick against a zero-width
+  // window — a setting that silently does nothing except spend money.
+  if (def.validate && !def.validate(value)) {
+    throw new BadRequestError(`"${JSON.stringify(value)}" is not a valid value for ${key}`, {
+      code: 'INVALID_SETTING_VALUE',
+    });
+  }
 
   const row = await prisma.systemSetting.upsert({
     where: { key },

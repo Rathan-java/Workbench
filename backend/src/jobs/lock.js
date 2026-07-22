@@ -78,6 +78,22 @@ export const releaseLock = async (name, { ok = true, note } = {}) => {
 };
 
 /**
+ * When did this job last actually finish, and how did it go?
+ *
+ * Shared state, which is the point: a job whose cadence is configurable needs to
+ * know when it last ran, and the answer must be the same on every instance and
+ * survive a restart. A module-level timestamp would give three different answers
+ * on three instances and reset to "never" on every deploy.
+ *
+ * @param {string} name
+ */
+export const getLockState = async (name) =>
+  prisma.schedulerLock.findUnique({
+    where: { name },
+    select: { lastRunAt: true, lastRunOk: true, lastRunNote: true },
+  });
+
+/**
  * Run `fn` at most once across the whole cluster.
  * Every job in this system goes through here — there is no other entry point.
  *
