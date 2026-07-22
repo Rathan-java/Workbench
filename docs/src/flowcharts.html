@@ -1,0 +1,843 @@
+<meta charset="utf-8">
+<title>Ara Workbench — Module Flowcharts</title>
+<link rel="stylesheet" href="doc.css">
+<script src="./vendor/mermaid.min.js"></script>
+<script>
+  mermaid.initialize({
+    startOnLoad: true,
+    theme: 'base',
+    flowchart: { curve: 'basis', nodeSpacing: 30, rankSpacing: 52, padding: 8, htmlLabels: true },
+    themeVariables: {
+      fontFamily: '"Segoe UI", system-ui, sans-serif',
+      fontSize: '14.5px',
+      primaryColor: '#f1f5f9',
+      primaryTextColor: '#14181f',
+      primaryBorderColor: '#94a3b8',
+      lineColor: '#64748b',
+      tertiaryColor: '#ffffff',
+    },
+  });
+</script>
+<style>
+  /* Node classes used across every diagram, so colour means the same thing on every page. */
+  .mermaid .c1 > rect, .mermaid .c1 > polygon, .mermaid .c1 > path { fill: #dbeafe !important; stroke: #2563eb !important; }
+  .mermaid .c2 > rect, .mermaid .c2 > polygon, .mermaid .c2 > path { fill: #fee2e2 !important; stroke: #b91c1c !important; }
+  .mermaid .c3 > rect, .mermaid .c3 > polygon, .mermaid .c3 > path { fill: #dcfce7 !important; stroke: #15803d !important; }
+  .mermaid .c4 > rect, .mermaid .c4 > polygon, .mermaid .c4 > path { fill: #f1f5f9 !important; stroke: #64748b !important; }
+  .mermaid .cluster rect { fill: #fafbfc !important; stroke: #cbd5e1 !important; }
+  .mermaid .edgeLabel { background: #ffffff !important; font-size: 11px !important; }
+</style>
+<style>
+  @page { size: A4 landscape; margin: 12mm 14mm; }
+  /* A4 landscape (210mm tall) minus the 12mm top and bottom margins. */
+  :root { --page-h: 183mm; } /* 3mm under the true 186mm: a box that exactly equals the printable height rounds onto a second sheet */
+</style>
+
+<div class="cover">
+  <div class="eyebrow">Ara Workbench</div>
+  <h1>Module Flowcharts</h1>
+  <p class="sub">Every module of the Enterprise Task Monitoring System, one diagram at a time.</p>
+  <dl>
+    <dt>System</dt><dd>Ara Workbench — hourly task monitoring, four departments, three roles</dd>
+    <dt>Stack</dt><dd>Node · Express · Prisma · MySQL 8 &nbsp;|&nbsp; React · Vite · Material&nbsp;UI</dd>
+    <dt>Diagrams</dt><dd>24, covering every backend module, the scheduled jobs and the cross-cutting core</dd>
+    <dt>Generated</dt><dd>21 July 2026</dd>
+  </dl>
+  <div class="note">
+    Each page is one module: the flow on the left of the footer, the rule it exists to enforce on the right.
+    Where a diagram shows a refusal — a 409, a 403, a "retired instead of deleted" — that refusal is the point
+    of the module, not an edge case.
+  </div>
+</div>
+
+<!-- ============================================================ 1 -->
+<div class="dpage first">
+  <div class="dhead">
+    <div class="kicker">Orientation</div>
+    <h2>1 · System architecture</h2>
+    <p class="dcap">How a browser request reaches the database, and what else touches the same data.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  subgraph CLIENT["Browser"]
+    UI["React SPA<br/>Vite · Material UI"]
+    RQ["react-query cache<br/>access token in memory only"]
+  end
+  subgraph API["Node / Express API"]
+    MW["Middleware chain<br/>helmet · cors · rate limit"]
+    AUTH["authenticate<br/>authorize"]
+    SCOPE["AccessScope<br/>department isolation"]
+    SVC["Service layer<br/>business rules"]
+  end
+  subgraph DATA["Persistence"]
+    DB[("MySQL 8<br/>via Prisma")]
+    FS["File storage<br/>avatars · exports"]
+  end
+  subgraph OUT["Outbound"]
+    CRON["node-cron scheduler<br/>9 jobs, DB-locked"]
+    MAIL["SMTP"]
+    GEM["Google Gemini<br/>gemini-2.5-flash"]
+  end
+  UI --> RQ --> MW --> AUTH --> SCOPE --> SVC --> DB
+  SVC --> FS
+  CRON --> SVC
+  SVC --> MAIL
+  SVC -.only opted-in departments.-> GEM
+  class UI,RQ c1
+  class MW,AUTH,SCOPE,SVC c4
+  class DB,FS c3
+  class CRON,MAIL,GEM c2
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — every read and write passes through authorize, then AccessScope, before any service runs.</div>
+    <div><b>Rule</b> — Gemini is the only outbound path carrying work descriptions, and only for departments that have opted in.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 2 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Cross-cutting core</div>
+    <h2>2 · The request lifecycle</h2>
+    <p class="dcap">The same chain runs for every endpoint in the system. Nothing bypasses it.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["HTTP request<br/>correlationId · helmet · CORS · rate limit"] --> C{"authenticate — token valid,<br/>and issued AFTER passwordChangedAt?"}
+  C -- no --> E["401 TOKEN_EXPIRED / TOKEN_REVOKED<br/>client refreshes once and replays"]
+  C -- yes --> H{"authorize<br/>permission held?"}
+  H -- no --> I["403 MISSING_PERMISSION<br/>names exactly what was missing"]
+  H -- yes --> J["AccessScope resolved from role<br/>+ zod validates body · query · params"]
+  J -- invalid --> L["422 with per-field issues"]
+  J -- valid --> M["Service runs —<br/>scopeWhere in every query"]
+  M --> N["The change and its audit row<br/>commit in ONE transaction"]
+  N --> O["200 envelope<br/>success · data · meta · correlationId"]
+  class A c4
+  class E,I,L c2
+  class C,H,J c1
+  class M,N,O c3
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — authenticate → epoch check → authorize → scope → validate → service → audit.</div>
+    <div><b>Rule</b> — the audit row is written in the same transaction as the change, so a successful write can never go unrecorded.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 3 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Cross-cutting core</div>
+    <h2>3 · AccessScope — department isolation</h2>
+    <p class="dcap">Isolation is not a filter the caller may forget. It is compiled into the WHERE clause of every scoped query.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart TD
+  A["Authenticated request"] --> B{"role"}
+  B -- MANAGEMENT --> C["scope.isGlobal = true<br/>departmentId: null"]
+  B -- TECH_LEAD --> D["scope.departmentId<br/>= their department"]
+  B -- "TECH_LEAD with<br/>NO department" --> E2["downgraded to SELF —<br/>deny, never silently escalate"]
+  E2 --> F
+  B -- EMPLOYEE --> E["scope.departmentId + scope.userId<br/>own rows only"]
+  C --> F["scopeWhere(scope)"]
+  D --> F
+  E --> F
+  F --> G{"isGlobal?"}
+  G -- yes --> H["{} — no restriction"]
+  G -- no --> I{"departmentId<br/>present?"}
+  I -- yes --> J["{ departmentId: 'dept_x' }"]
+  I -- no --> K["FAIL CLOSED<br/>impossible predicate<br/>returns zero rows"]
+  H --> L["Prisma query"]
+  J --> L
+  K --> L
+  class K,E2 c2
+  class C,D,E,J,H c1
+  class L c3
+  class A,B,F,G,I c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — the role resolves to a scope; the scope compiles to a mandatory WHERE fragment.</div>
+    <div><b>Rule</b> — a scope that cannot be resolved returns <b>nothing</b>, never everything. A bug here leaks an empty page, not another department's data.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 4 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · auth</div>
+    <h2>4 · Sign-in, sessions and token rotation</h2>
+    <p class="dcap">Refresh tokens rotate on every use. Replaying one is treated as theft, not as a retry.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["POST /auth/login"] --> B{"credentials and<br/>account status ok?"}
+  B -- no --> C["ONE generic 401 · failedLoginCount++<br/>5 failures → locked 15 min<br/>audit LOGIN_FAILED"]
+  B -- yes --> I["access token, 15 min<br/>+ refresh token in an httpOnly cookie<br/>only SHA-256 hashes are stored"]
+  I --> J{"mustChangePassword?"}
+  J -- yes --> K["every route → /change-password"]
+  J -- no --> L["the app"]
+  L -. access token expires .-> N{"POST /auth/refresh —<br/>token known and unrevoked?"}
+  N -- yes --> O["ROTATE: successor minted,<br/>predecessor marked replacedBy"]
+  O --> L
+  N -- "already used once" --> P["TOKEN_REUSE_DETECTED<br/>whole familyId revoked ·<br/>passwordChangedAt bumped · signed out"]
+  class C,P c2
+  class I,O,L c3
+  class B,J,N c1
+  class A,K c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — login issues a pair; refresh rotates the pair; reuse kills the family.</div>
+    <div><b>Rule</b> — only SHA-256 hashes are stored, and the access token never touches localStorage, so XSS cannot read it.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 5 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · auth</div>
+    <h2>5 · Password reset by OTP</h2>
+    <p class="dcap">Three steps, each independently bounded: the OTP expires, the attempts are counted, the reset token is single-use.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["POST /auth/forgot-password<br/>answers identically whether or not<br/>the account exists"] --> C["6-digit OTP · hashed · 5 min TTL<br/>max 5 attempts · emailed"]
+  C --> F{"POST /auth/verify-otp<br/>matches, unexpired, unconsumed?"}
+  F -- no --> G["attempts++ · prior codes invalidated<br/>too many → dead"]
+  F -- yes --> H["OTP consumed + a SEPARATE<br/>single-use reset token, 10 min"]
+  H --> J{"POST /auth/reset-password<br/>reset token valid?"}
+  J -- no --> K["400"]
+  J -- yes --> L["password replaced<br/>passwordChangedAt = now"]
+  L --> M["every live access token<br/>is now invalid"]
+  L --> N["every refresh session revoked"]
+  class G,K c2
+  class H,L,M,N c3
+  class F,J c1
+  class A,C c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — request → verify → reset, with a separate single-use token between the last two steps.</div>
+    <div><b>Rule</b> — the request step never reveals whether an email is registered, and the reset token stops "verify one account, reset another".</div>
+  </div>
+</div>
+
+<!-- ============================================================ 6 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · departments</div>
+    <h2>6 · Departments and their configuration</h2>
+    <p class="dcap">A department is a row, not an enum. Its working hours and its extra form fields are data, so a fifth department is a seed — not a release.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Management creates<br/>a department"] --> B["identity · colour ·<br/>working weekdays ·<br/>day start and end"]
+  B --> C["TIME SLOTS —<br/>the grid columns,<br/>generated from the<br/>LOGGING INTERVAL"]
+  C --> D["optional custom fields<br/>NONE are seeded"]
+  D --> E[("Department<br/>+ TimeSlot<br/>+ TaskFieldDefinition")]
+  E --> F["the hourly grid renders<br/>itself from this config"]
+  E --> G["AI analysis toggle<br/>aiAnalysisEnabled"]
+  C --> H{"remove a slot<br/>that has hours in it?"}
+  H -- yes --> I["RETIRED — leaves the grid,<br/>the work stays"]
+  E --> J{"delete the department?"}
+  J -- "holds teams, people,<br/>projects or hours" --> K["409 — the error names<br/>what is in the way"]
+  J -- "provably empty" --> L["deleted"]
+  class K c2
+  class I,L,E,F c3
+  class H,J c1
+  class A,B,C,D,G c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — configure identity, the working day and the logging interval; the grid generates itself from that config.</div>
+    <div><b>Rule</b> — no custom fields are seeded. Out of the box the hourly form asks two questions, because every extra required field is a tax paid once per employee per hour.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 6b -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · departments</div>
+    <h2>7 · Changing the logging cadence</h2>
+    <p class="dcap">Management decides how often people must describe what they completed — every hour, every two, every three. Rebuilding a live grid must never cost anybody their work.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Log every<br/><b>1h / 2h / 3h</b><br/>+ day start and end"] --> B["PLAN the columns<br/>pure function, no writes"]
+  B --> C{"Preview<br/>or apply?"}
+  C -- preview --> D["the plan, and nothing else —<br/>same planner as the write"]
+  C -- apply --> E{"for each existing column"}
+  E -- "start time survives,<br/>same span" --> F["reused — id kept,<br/>today's entries unaffected"]
+  E -- "start time survives,<br/>NEW span" --> G["re-spanned in place<br/>flagged if it carries work"]
+  E -- "start time is gone,<br/>HAS entries" --> H["RETIRED — leaves the grid,<br/>every entry stays"]
+  E -- "start time is gone,<br/>empty" --> I["deleted"]
+  B --> J["new start times → created"]
+  F --> K[("one transaction")]
+  G --> K
+  H --> K
+  I --> K
+  J --> K
+  K --> L["requiredSlotsPerDay follows<br/>the new column count"]
+  K --> M["audited: before → after"]
+  class H,G c2
+  class F,I,K,L,M,D c3
+  class C,E c1
+  class A,B,J c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — plan → preview → apply, matching columns by <i>start time</i> because the database permits exactly one column per start time per department.</div>
+    <div><b>Rule</b> — no task entry is ever deleted by a rebuild. A column carrying work is retired or re-spanned, and the preview names every such column, with its entry count, before anyone presses the button.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 7 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · users</div>
+    <h2>8 · Employee lifecycle</h2>
+    <p class="dcap">Three separate exits — deactivate, delete, and neither. Only one destroys anything, and it never destroys work.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Create employee<br/>temporary password ·<br/>mustChangePassword"] --> C["ACTIVE"]
+  C --> E{"Deactivate<br/>reason required"}
+  E --> F["INACTIVE · sessions revoked<br/>a lead seat is VACATED, not blocked —<br/>people leave before a replacement is hired"]
+  F -. reactivate .-> C
+  C --> H{"Delete forever"}
+  H --> I["delete-preview shows what survives ·<br/>the admin must type the full name"]
+  I --> J["name and code stamped onto every<br/>historical row FIRST — after the delete<br/>the FK is NULL and they are unfindable"]
+  J --> L["Cascade: refresh tokens ·<br/>reset OTPs · notifications"]
+  J --> M["SetNull: task days · entries · revisions ·<br/>assignments · audit · rollups · insights"]
+  M --> N["work still attributed BY NAME,<br/>badged 'former employee'"]
+  class L c2
+  class M,N,C c3
+  class E,H c1
+  class A,F,I,J c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — create → active → (deactivate ⇄ reactivate) → delete, with a preview before the irreversible step.</div>
+    <div><b>Rule</b> — deleting a person removes their <i>login</i>, never the record of work they did. 20 relations SetNull; only 3 cascade, and all 3 are personal credentials.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 8 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · teams</div>
+    <h2>9 · Teams and leadership</h2>
+    <p class="dcap">A team sits inside exactly one department and may exist before it has a lead.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart TD
+  A["Create team<br/>name · code · department"] --> B["Team (leadId nullable)"]
+  B --> C["Add members"]
+  C --> D["User.teamId set"]
+  B --> E["Appoint a Tech Lead"]
+  E --> F["leadId set<br/>lead's approvals queue fills"]
+  F --> G{"Remove the lead?"}
+  G --> H["warned: approvals fall back to<br/>other leads → Management →<br/>the auto-approval job"]
+  B --> I{"Delete team"}
+  I --> J{"has members?"}
+  J -- yes --> K["409 — its people<br/>cannot be orphaned"]
+  J -- no --> L["deleted"]
+  L --> M["SetNull on users, task days,<br/>entries, assignments, rollups"]
+  M --> N["Restructuring never<br/>deletes work"]
+  class K c2
+  class L,M,N,B c3
+  class G,I,J c1
+  class A,C,D,E,F,H c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — create → staff → appoint lead; deletion is refused while anyone is in it.</div>
+    <div><b>Rule</b> — an unled team still works: approvals escalate rather than stall.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 9 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · projects</div>
+    <h2>10 · Projects and modules</h2>
+    <p class="dcap">The project is the index every report reads. It is archived, never deleted, once an hour has been logged against it.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Create project<br/>code · name · client · dates"] --> B["ACTIVE"]
+  B --> C["ON_HOLD"] --> B
+  B --> D["COMPLETED"]
+  B --> E["ARCHIVED"]
+  B --> F["Project modules<br/>the deliverables"]
+  F --> G["PENDING"] --> H["IN_PROGRESS"] --> I["COMPLETED"]
+  B --> J{"Delete project"}
+  J --> K{"any hours logged?"}
+  K -- yes --> L["refused — archive instead;<br/>projectId is Restrict and NOT NULL"]
+  K -- no --> M["deleted"]
+  F --> N{"Delete module"}
+  N --> O{"assignments<br/>point at it?"}
+  O -- yes --> P["RETIRED (isActive = false)<br/>takes no new work, keeps its history"]
+  O -- no --> Q["deleted"]
+  B --> R["Every department is seeded with<br/>'Internal / Non-project'"]
+  R --> S["cannot be archived — it is the only<br/>honest home for a meeting"]
+  class L,S c2
+  class M,Q,P,B,R c3
+  class J,K,N,O c1
+  class A,C,D,E,F,G,H,I c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — a project holds modules; both retire rather than vanish once work references them.</div>
+    <div><b>Rule</b> — a mandatory field with no honest answer is how data goes bad, so every department gets a real "no specific project" option.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 10 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · assignments</div>
+    <h2>11 · Assignment lifecycle</h2>
+    <p class="dcap">Planned work, with a genuine lifecycle — the mirror image of an hourly entry, which records work already finished.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["<b>department → project → person</b><br/>members listed first, with<br/>the hours they have logged"] --> A2{"chosen person<br/>on the project?"}
+  A2 -- no --> A3["asks: assign and<br/>ADD them to it?"]
+  A3 --> B
+  A2 -- yes --> B["module (optional) · priority ·<br/>due date (optional) · estimate"]
+  B --> C["ASSIGNED"]
+  C --> D["IN_PROGRESS"]
+  D --> E["SUBMITTED<br/>assignee says it is done"]
+  E --> F{"lead reviews"}
+  F -- confirm --> G["DONE<br/>completedAt set"]
+  F -- send back --> H["REOPENED → IN_PROGRESS<br/>reviewNote required"]
+  H --> D
+  C -- "legal ONLY from ASSIGNED" --> I["CANCELLED"]
+  I -. restore .-> C
+  D -- "cancel REFUSED once<br/>an hour has been logged" --> X["real effort is on the record<br/>and must not be thrown away"]
+  I --> J["hours already logged against it<br/>SURVIVE — assignmentId SetNull"]
+  D --> K["hours logged against it<br/>form the progress thread"]
+  K --> L["hour → assignment → module → project"]
+  L --> M["the chain the AI analyser reasons over"]
+  C --> N["every move recorded in<br/>AssignmentTransition with actor + note"]
+  class I,H,X c2
+  class G,J,K,L,M c3
+  class F c1
+  class A,A3,B,C,D,E,N c4
+  class A2 c1
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — assigned → in progress → submitted → done, with reopen as the only way back. There is no delete, ever.</div>
+    <div><b>Rule</b> — cancellation is legal only before work starts. Once an hour has been logged, nobody — not even the person who created it — can cancel the assignment away.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 11 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · tasks</div>
+    <h2>12 · Logging an hour — the grid</h2>
+    <p class="dcap">The core interaction of the whole product: an employee accounting for one hour of one day.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Grid built from the employee's<br/><b>department config</b><br/>never hardcoded"] --> E{"click a cell —<br/>open assignments?"}
+  E -- yes --> F["'Which task?' REQUIRED<br/>+ 'Other work'<br/>task fills in the project"]
+  E -- no --> G["project picker<br/>required"]
+  F --> H["description:<br/>what did you<br/>complete this hour?"]
+  G --> H
+  H --> I["autosave 1.2s"]
+  I -- "no project" --> K["HELD, not stored<br/>cell stays 'unsaved'"]
+  I -- complete --> M{"version<br/>matches?"}
+  M -- no --> N["409 — use theirs<br/>or keep mine"]
+  M -- yes --> O[("TaskEntry + revision<br/>one transaction<br/>isLate computed server-side")]
+  class K,N c2
+  class O,A c3
+  class E,M c1
+  class F,G,H,I c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — the form asks two questions; a third appears only when the employee has assignments to attribute the hour to.</div>
+    <div><b>Rule</b> — an entry has no status and no priority. Every row is, by definition, work already completed.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 12 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · tasks</div>
+    <h2>13 · The day, and its approval</h2>
+    <p class="dcap">The only status axis in the system is the approval state of a <i>day</i> — never of the work itself.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["DRAFT"] --> B{"all required<br/>hours filled?"}
+  B -- no --> C["Submit disabled<br/>'Log all N hours before submitting'"]
+  B -- yes --> D["SUBMITTED"]
+  D --> E{"Tech Lead reviews<br/>in Approvals / Monitor"}
+  E -- approve --> F["APPROVED<br/>read-only for the owner"]
+  E -- return --> G["REJECTED<br/>review note REQUIRED"]
+  G --> H["employee edits<br/>any change moves it back"]
+  H --> A
+  F --> I{"Management or lead<br/>reopens?"}
+  I --> A
+  D --> J["auto-approval job<br/>if nobody reviews in time"]
+  J --> F
+  A --> K["every move written to<br/>TaskDayTransition: from · to · actor · note"]
+  class C,G c2
+  class F,K c3
+  class B,E,I c1
+  class A,D,H,J c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — draft → submitted → approved or rejected; rejection returns it to draft the moment it is edited.</div>
+    <div><b>Rule</b> — a returned sheet must carry a reason. The rejection note is a required field in the dialog, not a 422 after the fact.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 13 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · tasks (screens: Approvals + Monitor)</div>
+    <h2>14 · The lead's review loop</h2>
+    <p class="dcap">What a Tech Lead does each afternoon, and the two screens that support it.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Approvals queue<br/>OLDEST FIRST"] --> B["card: employee · date ·<br/>filled/expected · 'submitted 2h ago'"]
+  B --> C{"complete?"}
+  C -- no --> D["amber INCOMPLETE chip<br/>+ inline explanation"]
+  C -- yes --> E["Approve"]
+  B --> F["Review →<br/>/monitor?userId=…&date=…"]
+  F --> G["Monitor: department · date ·<br/>employee, filters in the URL"]
+  G --> H["the person's full hourly sheet"]
+  H --> I{"needs a fix?"}
+  I -- lead edits --> J["entry flagged LEAD EDIT<br/>revision records who and why"]
+  I -- send back --> K["Return + note → REJECTED"]
+  I -- fine --> E
+  E --> L["APPROVED + notification"]
+  K --> M["notification to the employee"]
+  A --> N["polls every 60s"]
+  class D,K c2
+  class E,L,J c3
+  class C,I c1
+  class A,B,F,G,H,M,N c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — queue → review the actual sheet → approve, edit, or return with a reason.</div>
+    <div><b>Rule</b> — a lead's edit is never silent. It is badged in the grid and recorded against the lead's name in the revision history.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 14 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · ai</div>
+    <h2>15 · The AI analyser</h2>
+    <p class="dcap">On a cadence Management sets: does the work logged actually advance the work assigned?</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Cron :10 hourly<br/>09–19 Mon–Fri<br/>(wake-up, not cadence)"] --> B{"configured, enabled,<br/>and <b>N hours</b> since<br/>the last run?"}
+  B -- no --> C["returns immediately<br/>nothing sent"]
+  B -- yes --> E["CANDIDATE QUERY<br/><b>WHERE aiAnalysisEnabled</b><br/>opt-out enforced in the SELECT"]
+  E --> H{"evidence changed<br/>since today's<br/>last finding?"}
+  H -- no --> I["SKIP<br/>nothing is sent"]
+  H -- yes --> J["Gemini 2.5-flash<br/>schema pinned"]
+  J -- "bad response" --> L["failed<br/>nothing recorded"]
+  J -- verdict --> M[("AiInsight written FIRST")]
+  M --> N{"ON_TRACK<br/>or INFO?"}
+  N -- yes --> O["recorded silently"]
+  N -- no --> P["notified"]
+  class C,L,I c2
+  class M,O,E c3
+  class B,H,N c1
+  class A,G,J,P c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — wake hourly, work only when due → select only opted-in departments → skip unchanged evidence → judge → write the row → then notify.</div>
+    <div><b>Rule</b> — the finding is written down <i>before</i> anyone is told, because a model's judgement about a person's work is an accusation and must be auditable against its inputs.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 15 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · ai</div>
+    <h2>16 · Who is told what</h2>
+    <p class="dcap">The same finding produces three different messages — and one silence.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Finding: MISALIGNED · CRITICAL"] --> B["Management"]
+  A --> C["Tech Lead of that department"]
+  A --> D["The employee"]
+  A --> E["Other departments"]
+  B --> F["full finding + evidence<br/>links to /insights"]
+  C --> F
+  D --> G["neutral nudge only:<br/>'Your logged hours need a look'<br/>no score · no reasoning · no verdict"]
+  E --> H["nothing — AccessScope"]
+  F --> I["GET /ai/insights<br/>Tech Lead 200 · Management 200"]
+  G --> J["GET /ai/insights<br/>EMPLOYEE → 403, always"]
+  I --> K["Acknowledge = 'seen it, handled'"]
+  A --> L["one alert per person<br/>per kind per DAY (dedupeKey, UNIQUE)"]
+  class G,J,H c2
+  class F,I,K c3
+  class L c1
+  class A,B,C,D,E c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — leads and management receive the assessment; the employee receives an action, not a judgement.</div>
+    <div><b>Rule</b> — the employee is <i>notified</i>, never <i>shown</i>. The 403 is enforced in the service as well as the route, so widening a permission bundle by accident does not open the door.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 15b -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · ai</div>
+    <h2>17 · The period review — on demand</h2>
+    <p class="dcap">What a two-hour window structurally cannot see: the same work described three different ways over a fortnight.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Management picks a<br/><b>department + period</b>, optionally<br/>ONE PROJECT and/or ONE PERSON<br/>— both default to everything"] --> B{"department<br/>opted in?"}
+  B -- no --> C["refused — the opt-out means<br/>NOT ON REQUEST EITHER"]
+  B -- yes --> D["a named person wins outright ·<br/>a project gathers member, assignee<br/>or logged-an-hour · otherwise<br/>EVERY active person"]
+  D --> E["evidence: the daily log,<br/>assignments, module <b>status +<br/>completedAt</b>, and if scoped<br/>to a project, entriesElsewhere"]
+  E --> F["Gemini — one call per person"]
+  F --> G{"anything<br/>logged in<br/>scope?"}
+  G -- none --> H["capped <b>in code</b>: WARNING,<br/>since leave explains silence —<br/>and only INFO if they logged<br/>elsewhere. Allocation, not effort"]
+  G -- some --> I{"same activity<br/>restated, AND<br/>already complete<br/>or overrun?"}
+  I -- yes --> J["NO_PROGRESS"]
+  I -- no --> K["ON_TRACK — repetition<br/>alone is not a finding"]
+  H --> L[("AiInsight · isReview = true")]
+  J --> L
+  K --> L
+  L --> M["shown to whoever asked.<br/><b>NOBODY IS NOTIFIED.</b>"]
+  class C,H,J c2
+  class K,L,M c3
+  class B,G,I c1
+  class A,D,E,F c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — a person chooses to look, optionally narrowing to one project or one employee → everybody in scope is read across the whole period → one finding each, worst first.</div>
+    <div><b>Rule</b> — absence of data can never be CRITICAL. The system holds no record of leave, so a quiet fortnight is explained equally well by it; that cap is enforced in code, because the prompt said it and the model did it anyway.</div>
+    <div><b>Rule</b> — a project filter shows the model one project's share of a person's time, so a full fortnight spent elsewhere would read as an empty one. Withholding the other hours is right; withholding the <i>fact</i> of them is not. One integer, <code>entriesElsewhere</code>, is the whole difference between "did nothing" and "was doing something else".</div>
+  </div>
+</div>
+
+<!-- ============================================================ 16 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · notifications</div>
+    <h2>18 · Notifications and de-duplication</h2>
+    <p class="dcap">A notification system that repeats itself is one everybody mutes — and then the alert that mattered goes unread too.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Event: approval · assignment ·<br/>AI finding · reminder"] --> C["notifyMany(), carrying a dedupeKey"]
+  C --> F{"dedupeKey<br/>already exists?"}
+  F -- yes --> G["rejected BY THE DATABASE —<br/>UNIQUE index + INSERT IGNORE,<br/>not an app check that races itself"]
+  F -- no --> E[("Notification row —<br/>PERSISTED FIRST")]
+  E --> H["bell badge, polled every 30s ·<br/>click marks read and follows the link"]
+  E --> I{"is the account<br/>still active?"}
+  I -- yes --> J["email — best effort only<br/>emailedAt stamped"]
+  I -- no --> K["never mailed — that address<br/>may have been reassigned"]
+  class G,K c2
+  class E,H c3
+  class F,I c1
+  class A,C,J c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — bulk sends carry a dedupe key; the unique index does the rejecting.</div>
+    <div><b>Rule</b> — deduplication is in the database, not in application code, because an app-level check races itself the moment there is more than one instance.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 17 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · reports</div>
+    <h2>19 · Reports and exports</h2>
+    <p class="dcap">Build a filter set, see the row count before committing, then export in one of three formats.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Filters: department · employee ·<br/>project · date range · late only"] --> B["Preview row count"]
+  B --> C{"format"}
+  C -- Excel --> D["XLSX"]
+  C -- CSV --> E["CSV"]
+  C -- PDF --> F["PDF<br/>capped at 2,000 rows"]
+  A --> G["scopeWhere applied<br/>a lead cannot export another department"]
+  D --> H{"rate limit<br/>10 per 5 min?"}
+  E --> H
+  F --> H
+  H -- exceeded --> I["429, message states the limit"]
+  H -- ok --> J["blob fetched WITH the bearer token"]
+  J --> K["filename from Content-Disposition"]
+  J --> L["audit REPORT_EXPORTED<br/>who exported what, when"]
+  class I c2
+  class J,K,L,G c3
+  class C,H c1
+  class A,B,D,E,F c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — filter → preview → choose format → authenticated blob download.</div>
+    <div><b>Rule</b> — exports are downloaded as authenticated blobs, never as a plain URL, because a plain URL would arrive at the server with no identity attached.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 18 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · dashboard</div>
+    <h2>20 · Dashboard and the nightly rollup</h2>
+    <p class="dcap">Dashboards read a materialised table, never the raw hours.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Cron 00:20 daily"] --> B["Rollup job"]
+  B --> C["for each person × day:<br/>expected · filled · late ·<br/>projectsTouched · complianceRate"]
+  C --> D[("DailyProductivityRollup<br/>one row per person per day")]
+  D --> E["Dashboard reads HERE"]
+  E --> F["Above the fold: today's<br/>per-department compliance<br/>+ who to chase"]
+  E --> G["Behind 'Detailed analytics':<br/>trends · leaderboard ·<br/>follow-ups · delivery"]
+  F --> H["refetch every 60s"]
+  D --> I["complianceRate STORED,<br/>not divided at query time"]
+  I --> J["no divide-by-zero on a day<br/>nobody was expected to work"]
+  D --> K["userId SetNull + employeeName kept"]
+  K --> L["last quarter's numbers do not shrink<br/>the day somebody leaves"]
+  class J,L,I,K c3
+  class E,F,G c1
+  class A,B,C,D,H c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — the nightly job materialises one row per person per day; every dashboard query reads that table.</div>
+    <div><b>Rule</b> — the dashboard defaults to <i>today</i>, not a 30-day range, and shows amber for lagging rather than red. 40% through the morning is not a crisis, it is a Tuesday.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 19 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · audit</div>
+    <h2>21 · The audit trail</h2>
+    <p class="dcap">Append-only. Never updated, never deleted — not even by the retention job.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Any state-changing action"] --> B["service writes the change<br/>+ the audit row in ONE transaction"]
+  B --> C[("AuditLog")]
+  C --> D["action · entityType · entityId"]
+  C --> E["actorId + actorEmail + actorRole<br/>SNAPSHOT at the time"]
+  C --> F["before / after JSON diff"]
+  C --> G["ip · userAgent · correlationId · success"]
+  E --> H["survives the actor being deleted<br/>AND their role being changed"]
+  C --> I["Admin › Audit log"]
+  I --> J["filter: actor · entity ·<br/>action · succeeded/failed · date"]
+  J --> K["row drawer: raw diff<br/>+ copyable correlation ID"]
+  K --> L["the same ID the API returned<br/>to the user who hit the error"]
+  C --> M["45 action types,<br/>including LOGIN_FAILED and<br/>TOKEN_REUSE_DETECTED"]
+  class C,E,H,B c3
+  class J c1
+  class A,D,F,G,I,K,L,M c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — change and audit row commit together, or neither commits.</div>
+    <div><b>Rule</b> — the actor's email and role are snapshotted, so an audit trail does not become anonymous the moment somebody is promoted or leaves.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 20 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · settings</div>
+    <h2>22 · Runtime settings</h2>
+    <p class="dcap">What can be changed without a deploy — and, deliberately, what cannot.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["Admin › Settings<br/>Management only"] --> B["grouped by category"]
+  B --> C["notifications · task entry<br/><b>AI cadence</b>"]
+  B --> D["task entry rules"]
+  C --> E[("SystemSetting<br/>key · JSON value · updatedById")]
+  D --> E
+  E --> F["read at runtime<br/>no redeploy"]
+  A --> G["System status<br/>+ 'run job now' triggers"]
+  A --> H["SECRETS ARE EXCLUDED"]
+  H --> I["API keys · SMTP password ·<br/>DB URL live in env vars only"]
+  I --> J["never rendered, never returned<br/>by any endpoint"]
+  E --> K["every change audited<br/>SETTING_UPDATED with before/after"]
+  class H,I,J c2
+  class E,K,F c3
+  class A,B,C,D,G c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — business policy is editable at runtime; infrastructure and secrets are not.</div>
+    <div><b>Rule</b> — "180 days" is a business policy and lives in settings. A credential is not a setting and never appears in the UI.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 21 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">Module · jobs</div>
+    <h2>23 · Scheduled jobs and the distributed lock</h2>
+    <p class="dcap">Nine jobs, any number of instances, exactly one run each.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  subgraph I["Every App Service instance fires its own cron"]
+    A1["instance 1"]
+    A2["instance 2"]
+    A3["instance 3"]
+  end
+  A1 --> L{"withLock(name, ttl)"}
+  A2 --> L
+  A3 --> L
+  L -- "won the row" --> R["job runs once"]
+  L -- "lock held" --> S["returns quietly"]
+  R --> T["lastRunAt · lastRunOk ·<br/>lastRunNote written back"]
+  R --> U["throw is SWALLOWED —<br/>a bad job never takes down<br/>the app people log hours in"]
+  T --> V["visible in Admin › Settings"]
+  R --> W["hourly reminders :50 · auto-approve :40<br/>AI analysis :10 hourly 09–19 Mon–Fri, gated to the set cadence<br/>lead digest 13:30 &amp; 18:30 · mgmt summary 19:00<br/>unsubmitted check 09:15 · assignment reminders 09:30<br/>rollup 00:20 · retention cleanup 00:05"]
+  class S,U c2
+  class R,T,V c3
+  class L c1
+  class A1,A2,A3,W c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — all instances race for one database row; the loser does nothing.</div>
+    <div><b>Rule</b> — without this, scaling out means three reminder emails to every employee and three concurrent 180-day deletes.</div>
+  </div>
+</div>
+
+<!-- ============================================================ 22 -->
+<div class="dpage">
+  <div class="dhead">
+    <div class="kicker">The contract</div>
+    <h2>24 · What survives a deletion</h2>
+    <p class="dcap">The single most important invariant in the system, drawn out in full.</p>
+  </div>
+  <div class="dbody"><pre class="mermaid">
+flowchart LR
+  A["DELETE an employee"] --> B["Cascade — personal credentials"]
+  A --> C["SetNull + name snapshot — the work"]
+  B --> B1["refresh tokens"]
+  B --> B2["password reset OTPs"]
+  B --> B3["notifications"]
+  C --> C1["task days · task entries"]
+  C --> C2["entry revisions · day transitions"]
+  C --> C3["assignments · assignment transitions"]
+  C --> C4["audit log"]
+  C --> C5["productivity rollups"]
+  C --> C6["AI insights"]
+  C1 --> D["still attributed BY NAME<br/>+ employeeCode, badged former employee"]
+  E["DELETE a department"] --> F["REFUSED 409 while it holds<br/>teams · people · projects · hours"]
+  G["DELETE a team"] --> H["REFUSED 409 while it has members"]
+  I["DELETE a project with hours"] --> J["REFUSED — archive instead"]
+  K["REMOVE an hour with work in it"] --> L["RETIRED, not destroyed"]
+  class B,B1,B2,B3 c2
+  class C,C1,C2,C3,C4,C5,C6,D c3
+  class F,H,J,L c1
+  class A,E,G,I,K c4
+  </pre></div>
+  <div class="dfoot">
+    <div><b>Flow</b> — removing a person, a team, a department or an hour never removes the record of work that was done.</div>
+    <div><b>Rule</b> — this was once a Cascade. Deleting one employee silently erased months of delivery history, and every report covering that period quietly stopped adding up.</div>
+  </div>
+</div>

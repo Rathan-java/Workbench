@@ -4,6 +4,13 @@
  */
 const BASE = 'http://localhost:4000/api/v1';
 
+// Credentials are overridable. The seeded default is right for CI and a fresh
+// database, but the moment somebody changes the admin password on the machine
+// they are testing on, a hardcoded literal fails 100 tests that have nothing to
+// do with the change. Override with:  SMOKE_ADMIN_PASSWORD=... node <this file>
+const ADMIN_EMAIL = process.env.SMOKE_ADMIN_EMAIL ?? 'admin@ara-workbench.local';
+const ADMIN_PASSWORD = process.env.SMOKE_ADMIN_PASSWORD ?? 'ChangeMe@Admin123';
+
 let passed = 0;
 let failed = 0;
 const results = [];
@@ -51,7 +58,7 @@ const section = (title) => results.push(`\n\x1b[1m\x1b[36m${title}\x1b[0m`);
 section('AUTH — sign in as Management');
 const login = await api('/auth/login', {
   method: 'POST',
-  body: { email: 'admin@ara-workbench.local', password: 'ChangeMe@Admin123' },
+  body: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
 });
 check('Management logs in', login.success === true, JSON.stringify(login.error));
 const adminToken = login.data?.accessToken;
@@ -63,7 +70,7 @@ check('mustChangePassword is enforced on the seeded admin', login.data?.user?.mu
 section('AUTH — negative paths');
 const badPw = await api('/auth/login', {
   method: 'POST',
-  body: { email: 'admin@ara-workbench.local', password: 'WrongPassword123!' },
+  body: { email: ADMIN_EMAIL, password: 'WrongPassword123!' },
 });
 check('wrong password is rejected', badPw.status === 401);
 check('error message does not reveal whether the account exists',
@@ -80,7 +87,7 @@ const noAuth = await api('/users');
 check('unauthenticated request to /users is 401', noAuth.status === 401);
 
 section('AUTH — forgot password does not enumerate');
-const forgotReal = await api('/auth/forgot-password', { method: 'POST', body: { email: 'admin@ara-workbench.local' } });
+const forgotReal = await api('/auth/forgot-password', { method: 'POST', body: { email: ADMIN_EMAIL } });
 const forgotFake = await api('/auth/forgot-password', { method: 'POST', body: { email: 'ghost@nowhere.local' } });
 check('forgot-password returns 200 for a real account', forgotReal.status === 200);
 check('forgot-password returns 200 for a fake account too', forgotFake.status === 200);

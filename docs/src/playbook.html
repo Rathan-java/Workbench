@@ -1,0 +1,639 @@
+<meta charset="utf-8">
+<title>Ara Workbench — Playbook</title>
+<link rel="stylesheet" href="doc.css">
+<script src="./vendor/mermaid.min.js"></script>
+<script>mermaid.initialize({ startOnLoad: false });</script>
+<style>
+  @page { size: A4 portrait; margin: 16mm 15mm 14mm; }
+  /* A4 portrait (297mm tall) minus the 16mm top and 14mm bottom margins. */
+  :root { --page-h: 264mm; }
+</style>
+
+<div class="cover">
+  <div class="eyebrow">Ara Workbench</div>
+  <h1>Playbook</h1>
+  <p class="sub">How the Enterprise Task Monitoring System works, who it is for, and the rules it will not bend.</p>
+  <dl>
+    <dt>System</dt><dd>Task monitoring across four departments, three roles, on a cadence each department sets</dd>
+    <dt>Backend</dt><dd>Node · Express · Prisma · MySQL 8</dd>
+    <dt>Frontend</dt><dd>React · Vite · Material UI (JavaScript, not TypeScript)</dd>
+    <dt>AI</dt><dd>Google Gemini <code>gemini-2.5-flash</code>, opt-in per department</dd>
+    <dt>Companion</dt><dd>Module Flowcharts (separate PDF) — one diagram per module</dd>
+    <dt>Generated</dt><dd>21 July 2026</dd>
+  </dl>
+  <div class="note">
+    This playbook describes behaviour that is implemented and running, not intentions. Where the system
+    refuses to do something — delete a department, cancel work already begun, show an employee the AI's
+    assessment of them — the refusal is documented as a rule, because that is what it is.
+  </div>
+</div>
+
+<!-- ================================================================= -->
+<div class="page first">
+<h2><span class="num">1</span>What this system is</h2>
+<p class="lead">A record of what every employee did, block by block, that managers can trust and employees can live with.</p>
+
+<p>Ara Workbench asks each employee one question per block of working time — hourly by default, or every two or three hours where that is the honest cadence: <i>what did you complete?</i> Those answers roll up
+three ways off a single table — by person, by project, by department — so progress can be reported without anyone
+maintaining a second set of books.</p>
+
+<p>Around that core sit four things: <b>assignments</b> (work handed out, so hours can be checked against intent),
+<b>approvals</b> (a Tech Lead signs off each day), <b>analytics</b> (a nightly rollup feeding the dashboards), and an
+<b>AI analyser</b> that asks, on a cadence Management sets, whether the hours logged actually advance the work assigned.</p>
+
+<h3>The design position</h3>
+<p>Two decisions shape everything else, and both are unusual enough to state plainly.</p>
+
+<div class="rule">
+  <span class="label">An entry records work already done</span>
+  <p>A task entry therefore has <b>no status and no priority</b>. Every row is, by definition, completed work.
+  A column that can only ever hold one value is not information — it is a field that invites people to lie to it,
+  and a denominator that quietly inflates. Status lives on the <i>day</i> (an approval state) and on
+  <i>assignments</i> and <i>project modules</i>, which are genuinely work still ahead.</p>
+</div>
+
+<div class="rule">
+  <span class="label">The work is the company's, not the person's</span>
+  <p>Removing a person, a team, a department or an hour must never remove the record of work that was done.
+  Deleting an employee removes their <i>login</i>; their logged hours stay, still attributed to them by name.
+  This was once a cascade, and deleting one employee silently erased months of delivery history.</p>
+</div>
+
+<h3>Who uses it</h3>
+<table>
+  <tr><th>Role</th><th>What they do here</th><th>What they can see</th></tr>
+  <tr><td><b>Employee</b></td><td>Logs each working hour, submits the day, works assignments</td><td>Their own rows only</td></tr>
+  <tr><td><b>Tech Lead</b></td><td>Approves or returns sheets, assigns work, exports reports, reads AI findings</td><td>Their whole department</td></tr>
+  <tr><td><b>Management</b></td><td>Administers departments, people, teams, projects, settings; reads the audit log</td><td>The whole company</td></tr>
+</table>
+
+<p>Departments are <b>data, not an enum</b>. Adding a fifth is a row, not a release: its working hours, its grid columns
+and any extra form fields are all configuration. The four seeded departments are Tech Team, Digital Marketing,
+Social Media Management and Video Editing.</p>
+
+<div class="note-box">
+  <span class="label">Isolation</span>
+  <p>A Tech Lead of Video Editing must never, under any code path, see a Digital Marketing employee's task.
+  This is not a check that each endpoint remembers to make — it is a filter that is impossible to omit. See §4.</p>
+</div>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">2</span>Running it</h2>
+<p class="lead">From a clean machine to a signed-in browser.</p>
+
+<h3>Prerequisites</h3>
+<ul>
+  <li>Node.js 20+ and npm</li>
+  <li>MySQL 8 — <code>docker-compose.yml</code> at the repo root brings one up on port <b>3307</b>, deliberately
+      off 3306 so it cannot clash with a MySQL you already have</li>
+</ul>
+
+<h3>First run</h3>
+<table>
+  <tr><th>#</th><th>Step</th><th>Command</th></tr>
+  <tr><td>1</td><td>Database</td><td><code>docker compose up -d</code></td></tr>
+  <tr><td>2</td><td>Backend config</td><td>copy <code>backend/.env.example</code> → <code>backend/.env</code>, fill it in</td></tr>
+  <tr><td>3</td><td>Install</td><td><code>npm install</code> in <code>backend/</code> and <code>frontend/</code></td></tr>
+  <tr><td>4</td><td>Schema</td><td><code>npm run db:deploy</code> (production) or <code>db:migrate</code> (dev)</td></tr>
+  <tr><td>5</td><td>Seed</td><td><code>npm run db:seed</code></td></tr>
+  <tr><td>6</td><td>API</td><td><code>npm run dev</code> → <code>http://localhost:4000</code></td></tr>
+  <tr><td>7</td><td>Web</td><td><code>npm run dev</code> in <code>frontend/</code> → <code>http://localhost:5173</code></td></tr>
+</table>
+
+<div class="warn">
+  <span class="label">Config is validated at boot</span>
+  <p>Every variable in <code>.env</code> is checked by <code>src/config/env.js</code> when the process starts.
+  A bad config <b>refuses to start</b> rather than failing three hours later inside a request handler. If the API
+  will not boot, read the first lines of its output — it names the variable.</p>
+</div>
+
+<h3>Health and prefixes</h3>
+<p>Liveness is <code>GET /healthz</code>. Every API route sits under <code>/api/v1</code>. There is no
+<code>/api/health</code>; looking for one is the usual first wrong turn.</p>
+
+<h3>Seeded accounts</h3>
+<p>The seed creates one Management account plus a populated demo company. Every seeded user shares the password
+<code>Password@2026!</code>; the Management account's password is set from your environment. All seeded users are
+flagged <code>mustChangePassword</code>, so the first sign-in goes straight to a forced password change — which is
+also the fastest way to confirm the auth chain works end to end.</p>
+
+<h3>Settings that are not in .env</h3>
+<p>Business policy lives in <b>Admin › Settings</b> and takes effect without a redeploy: reminder grace minutes,
+auto-approval hours, the backdating window, autosave debounce, whether daily submission is required, and how often the AI analyser runs.
+Secrets and infrastructure — the database URL, the JWT secret, the SMTP password, the Gemini key — are environment
+variables only, and are never rendered or returned by any endpoint. An admin UI that can rewrite the JWT secret is
+an admin UI that can compromise the whole system.</p>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">3</span>A day in the system</h2>
+<p class="lead">The same day, from three seats.</p>
+
+<h3>The employee</h3>
+<ol>
+  <li>Opens <b>My Task Sheet</b>. The grid's columns come from their department's configuration — Tech sees
+      10:00–18:00, Video Editing sees its own shift, from the same screen.</li>
+  <li>Each block, fills a cell: <i>what did you complete?</i> plus a project. If they have open
+      assignments, a third question appears first — <b>which task?</b> — with an honest "Other work" option.</li>
+  <li>Text autosaves after 1.2 seconds. A small indicator says saving / saved / unsaved — never a blocking spinner.</li>
+  <li>Logging an hour late is <b>allowed</b> and flagged <code>LATE</code>. The system measures the behaviour
+      rather than preventing the record.</li>
+  <li>When every required hour is filled, <b>Submit</b> becomes available. Until then its tooltip says how many
+      hours are outstanding.</li>
+</ol>
+
+<h3>The Tech Lead</h3>
+<ol>
+  <li><b>Approvals</b> shows submitted sheets <b>oldest first</b>, with filled/expected hours and how long each has
+      been waiting.</li>
+  <li><b>Review</b> deep-links to <b>Monitor</b> — the person's actual hourly sheet — because approving a number
+      without reading the work is not review.</li>
+  <li>Approve, or Return with a note. The note is a required field in the dialog, not a 422 after the fact.</li>
+  <li>A lead may correct an entry directly. It is badged <code>LEAD EDIT</code> in the grid and recorded against
+      the lead's name in the revision history. A lead's edit is never silent.</li>
+  <li><b>AI Insights</b> lists findings from the analyser, each expandable to the exact evidence the model was given.</li>
+</ol>
+
+<h3>Management</h3>
+<ol>
+  <li><b>Dashboard</b> opens on <b>today</b>, not a 30-day range: per-department compliance and a list of names to chase.
+      Everything else is behind "Detailed analytics".</li>
+  <li>Administration covers departments, employees, teams, projects, the audit log and settings.</li>
+  <li>Management has no department and therefore no task sheet — they do not log hours, and the nav hides it.</li>
+</ol>
+
+<div class="note-box">
+  <span class="label">Two thresholds, deliberately different</span>
+  <p>Two hours past an unfilled slot earns a private nudge. Three hours puts your name on the Management dashboard.
+  The gap exists so that a nudge stays a nudge.</p>
+</div>
+
+<h3>What happens without anyone</h3>
+<p>Nine scheduled jobs keep the system honest when nobody is looking: hourly reminders with a three-way escalation,
+a lead digest twice a day, a management summary at 19:00, auto-approval of sheets nobody reviewed within 24 hours,
+the nightly rollup, the 180-day retention sweep, and the AI analyser. See §8.</p>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">4</span>Access: roles, permissions, scope</h2>
+<p class="lead">Two independent questions — <i>may this role do this kind of thing at all?</i> and <i>to which rows?</i></p>
+
+<h3>Permissions, not role checks</h3>
+<p>No controller, service or repository in this codebase may contain <code>if (user.role === 'MANAGEMENT')</code>.
+Capabilities are named <code>resource:verb</code>; roles are bundles of them; routes declare the capability they need.
+At boot, the app throws if any declared permission is assigned to no role — otherwise it is dead code.</p>
+
+<table>
+  <tr><th>Role</th><th>Adds</th></tr>
+  <tr><td><b>Employee</b></td><td><code>task:read</code>, <code>task:write:own</code>, <code>task:submit</code>,
+    <code>task:add-overtime</code>, <code>task:history:read</code>, <code>assignment:read</code>,
+    <code>assignment:submit</code>, <code>project:read</code>, <code>team:read</code>, <code>department:read</code>,
+    <code>dashboard:self</code>, <code>notification:read</code>, profile and password</td></tr>
+  <tr><td><b>Tech Lead</b></td><td>everything above, plus <code>task:write:any</code>, <code>task:approve</code>,
+    <code>task:reject</code>, <code>task:override-lock</code>, <code>assignment:create/update/review/cancel</code>,
+    <code>user:read</code>, <code>user:reset-password</code>, <code>dashboard:team</code>, <code>report:export</code></td></tr>
+  <tr><td><b>Management</b></td><td>everything above, plus <code>task:delete</code>, full <code>user:*</code>,
+    <code>role:assign</code>, <code>team:manage</code>, <code>project:manage</code>, <code>department:manage</code>,
+    <code>dashboard:global</code>, <code>audit:read</code>, <code>settings:read/manage</code></td></tr>
+</table>
+
+<h3>Scope: which rows</h3>
+<table>
+  <tr><th>Scope</th><th>Held by</th><th>Compiles to</th></tr>
+  <tr><td>GLOBAL</td><td>Management</td><td><code>{}</code> — the whole company</td></tr>
+  <tr><td>DEPARTMENT</td><td>Tech Lead with a department</td><td><code>{ departmentId }</code></td></tr>
+  <tr><td>SELF</td><td>Employee — <i>and</i> a Tech Lead with no department</td><td><code>{ userId }</code></td></tr>
+  <tr><td>unknown</td><td>—</td><td>an impossible predicate: <b>zero rows</b></td></tr>
+</table>
+
+<div class="rule">
+  <span class="label">Fails closed</span>
+  <p>An unresolvable scope returns a sentinel no id can equal, so it matches <b>nothing</b> rather than everything.
+  A Tech Lead with no department is downgraded to SELF — deny, never silently escalate. A bug here leaks an empty
+  page, not another department's data.</p>
+</div>
+
+<p>A requested filter is merged with the permitted scope, and the permitted scope always wins. An employee asking
+for someone else's rows is <b>denied outright</b>, not silently rewritten to their own — silently rewriting would
+mask a broken client.</p>
+
+<h3>The UI is not the guard</h3>
+<p>The frontend hides buttons the user cannot use, using permissions the server sent. Those are cosmetic affordances.
+The API authorises independently and returns 403. An unauthorised page shows an explanatory lock screen inside the
+normal app shell — not a redirect, not a blank.</p>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">5</span>Module reference</h2>
+<p class="lead">Every backend module, what it is for, and the rules it enforces. The companion Flowcharts PDF has one diagram per module.</p>
+
+<h3>auth</h3>
+<p>Sign-in, sessions, password recovery, own profile. Access tokens are 15-minute JWTs; refresh tokens are opaque,
+stored only as SHA-256 hashes, and delivered in an httpOnly, secure, strict-sameSite cookie.</p>
+<ul>
+  <li><b>Rotation with reuse detection.</b> Every refresh mints a successor and revokes its predecessor. Replaying a
+      used token revokes the entire token family and bumps the password epoch, signing the account out everywhere.</li>
+  <li><b>Token epoch.</b> Any access token issued before <code>passwordChangedAt</code> is rejected, so a password
+      change, a demotion or a department move cannot be outlived by a stale token.</li>
+  <li><b>No enumeration.</b> Forgot-password always answers identically. Login returns one generic error, and the
+      inactive-account check happens <i>after</i> the password check.</li>
+  <li><b>The policy is not applied at login</b> — applying it there tells an attacker which passwords could not exist.</li>
+  <li>Lockout after 5 failures for 15 minutes, held in the database so it survives scale-out.</li>
+</ul>
+
+<h3>users</h3>
+<p>Employee administration, scoped so a lead sees only their department.</p>
+<ul>
+  <li>You cannot change your own role or status, or delete your own account.</li>
+  <li>The <b>last active Management account</b> cannot be demoted, deactivated or deleted.</li>
+  <li>A Tech Lead who still leads an active team cannot be moved to another department — that would leave a team
+      led by someone who cannot see it.</li>
+  <li>Changing role, department or status revokes every session immediately.</li>
+  <li>A department-scoped caller may reset <b>employees'</b> passwords only. Handing one lead the power to issue
+      another lead a password is a lateral takeover, not a helpdesk favour.</li>
+  <li><b>Deletion stamps names onto history first</b>, then deletes the account — after the delete the foreign key
+      is already NULL and there is no way left to find which rows were theirs.</li>
+</ul>
+
+<h3>departments</h3>
+<p>Departments plus their working-hour columns and bespoke task fields.</p>
+
+<div class="rule">
+  <span class="label">The logging cadence is Management's to set</span>
+  <p>Each department carries a <b>logging interval</b> (30 minutes to 4 hours), a day start and a day end.
+  <b>Admin › Departments › Working hours</b> regenerates that department's grid columns from them.
+  "Hourly" was an assumption baked into the product; it is now a setting, because the honest cadence differs by
+  the kind of work. An editor mid-render or an engineer mid-debug cannot describe a completed unit of work every
+  sixty minutes, and forcing them to produces "continued task" in every row — which is worse than no data,
+  because it looks like data.</p>
+  <p>The change is two steps by design: <b>preview</b>, then apply. The preview is computed by the same planner as
+  the write, and names every column that would be affected. <code>requiredSlotsPerDay</code> follows the new column
+  count automatically — leaving it at 7 after halving the columns would mark every employee permanently
+  non-compliant, and nobody would connect it to this change.</p>
+</div>
+
+<div class="warn">
+  <span class="label">What a rebuild does to existing work</span>
+  <p><b>No task entry is ever deleted by a rebuild.</b> A column the new layout has no place for is
+  <b>retired</b> — it leaves the grid, its entries stay readable, exportable and attributable. Only genuinely
+  empty columns are deleted. Because the database allows exactly one column per start time per department, a
+  column whose start time survives with a different span is <b>re-spanned in place</b>: no entry moves, but the
+  label above it changes (10:00–11:00 becomes 10:00–12:00). The preview lists those separately, with their entry
+  counts, so that is a decision rather than a discovery. Overtime columns are never touched.</p>
+</div>
+
+<ul>
+  <li>Deletion is refused while the department holds employees, teams, real projects or logged hours (409, naming
+      the blocker). To retire one with history, deactivate it.</li>
+  <li>Time slots may not overlap. Removing a slot that has hours behind it <b>retires</b> it — a hard delete would
+      cascade real work away.</li>
+  <li><b>Overtime</b> appends the next hour after the last column, and is excluded from required hours. An overtime
+      column that counted toward the requirement would silently make overtime mandatory. It can be removed only
+      while empty for everyone, and never past midnight.</li>
+  <li>A custom field's <code>key</code> is immutable once entries carry it; change the label instead, which is what
+      users actually see. Field deletion is soft, so old values stay queryable.</li>
+</ul>
+
+<h3>projects</h3>
+<ul>
+  <li>Every logged hour must name a project, so every department is seeded with an <b>Internal / Non-project</b>
+      catch-all. It cannot be deleted and cannot leave ACTIVE — a mandatory field with no honest answer is how data
+      goes bad.</li>
+  <li>A project with logged hours cannot be deleted, only <b>archived</b>; archiving removes it from the picker while
+      every hour keeps its index.</li>
+  <li>A project cannot change department, or its hours would land on the wrong side of the isolation boundary.</li>
+  <li>The dropdown offers ACTIVE projects only — offering an archived one is how dirty data gets created.</li>
+  <li><b>Modules</b> are the deliverables a project is made of. A module with assignments is retired, not deleted.
+      <code>completedAt</code> is derived from the transition and cleared on reopen: a completion date on something
+      still in progress is a lie the reports believe.</li>
+</ul>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h3>projects — who is on one</h3>
+<p>Until recently nobody <i>belonged</i> to a project: people belonged to departments and teams, projects belonged to departments, and the only trace of who worked on what was whoever had logged an hour. That answers a question about the past. It cannot say who is on a project before the first hour is logged, and it cannot be corrected when it is wrong.</p>
+<p><b>Project membership</b> now exists as its own record. The <b>Assign task</b> dialog reads department → project → person, and the people list puts members at the top with the hours they have logged, everyone else in the same department below them in muted text.</p>
+<div class="rule">
+  <span class="label">Muted, not hidden</span>
+  <p>Non-members are still selectable, deliberately. A brand-new project has no members at all, so a members-only list could never be given its first person — and putting somebody onto a project is one of the most ordinary reasons to open the dialog. Choosing one asks: <i>"They are in the right department but not on this project. Assign the task and add them?"</i> Answering yes does both, in a single transaction, so you can never end up with someone holding work on a project they are still not on.</p>
+</div>
+<p>Membership is <b>current state, not history</b>. It is the one place in this schema where deleting a person removes the row — the record of what they did lives on their task entries and assignments, which are preserved as always. Taking somebody off a project likewise removes nothing they did. Membership never crosses a department boundary.</p>
+
+<h3>assignments</h3>
+<p>Forward-looking work handed to a person. Hours logged against an assignment form its progress thread, and complete
+the chain the AI reasons over: <b>hour → assignment → module → project</b>.</p>
+<ul>
+  <li>States: ASSIGNED → IN_PROGRESS → SUBMITTED → DONE, with reopen as the only way back.</li>
+  <li><b>Cancellation is legal only from ASSIGNED.</b> Once an hour has been logged, nobody — including the creator —
+      can cancel it away: real effort is on the record.</li>
+  <li>There is <b>no delete</b>, ever.</li>
+  <li>Two-party handshake: only the assignee may submit; nobody may review their own work, including a Tech Lead
+      who was assigned it.</li>
+  <li>The assignee and department are fixed at creation and taken from the assignee, never from the client. The
+      project is immutable; only the module may be re-pointed, and only within the same project.</li>
+  <li>A percentage complete is shown only where an <code>estimatedHours</code> estimate exists. Otherwise the UI
+      shows effort and never a guessed percentage.</li>
+  <li>The first hour logged flips ASSIGNED → IN_PROGRESS inside the same transaction that saves the entry.</li>
+</ul>
+
+<h3>tasks</h3>
+<p>The hourly grid and the day approval workflow. Five invariants: scope, locking, concurrency, history, backdating.</p>
+<ul>
+  <li><b>Day states:</b> DRAFT → SUBMITTED → APPROVED or REJECTED. Editing a rejected sheet returns it to DRAFT
+      automatically. An approved day can be reopened only by a lead, as an explicit audited override.</li>
+  <li><b>Two things lock a day:</b> its status (SUBMITTED/APPROVED), and age beyond the backdating window
+      (default 2 days). Future dates are refused outright.</li>
+  <li><b>Lateness is measured, not blocked.</b> <code>isLate</code> is computed server-side from the slot's end plus
+      grace — never trusted from the client, never inferred from <code>updatedAt</code>.</li>
+  <li><b>Submission requires completeness</b>, counted against the real current slots rather than the configured
+      integer, so an admin's grid change cannot demand a column that no longer exists.</li>
+  <li><b>Autosave never creates an unprojected row.</b> It is skipped and reported as skipped, so the cell stays
+      honestly "unsaved" — which is exactly what is true.</li>
+  <li><b>Every mutation writes a revision</b> in the same transaction, storing the project <i>name</i> as well as its
+      id so the history stays readable in two years after a rename. A delete writes its tombstone before the row goes.</li>
+  <li>Optimistic concurrency: a stale <code>version</code> returns 409 with the server's current row attached, so the
+      UI can offer "use theirs / keep mine" instead of losing the edit.</li>
+  <li>Break slots are not writable. Overtime slots are — that is the entire point of them.</li>
+</ul>
+
+<h3>reports</h3>
+<ul>
+  <li>Excel, CSV or PDF, streamed, always scoped to the caller — a lead's export contains only their department.</li>
+  <li>Every export writes a <code>REPORT_EXPORTED</code> audit row. Exporting data is an event a compliance officer
+      will one day want to see.</li>
+  <li>CSV is escaped against formula injection.</li>
+</ul>
+
+<h3>dashboard</h3>
+<ul>
+  <li>The compliance denominator counts only hours that have actually <b>finished</b>, excluding the in-progress hour,
+      breaks and overtime. A metric that is red by construction every morning is one everybody ignores by lunchtime.</li>
+  <li>Team follow-up separates fill rate from on-time rate: a team at 100% fill and 30% on-time is
+      <b>backfilling</b>, not complying.</li>
+  <li>Departments with zero activity are kept on the chart. A department that logged nothing is the most important
+      bar on it.</li>
+</ul>
+
+<h3>notifications</h3>
+<ul>
+  <li>You can only read and mark your own — there is no <code>userId</code> parameter anywhere in this module.</li>
+  <li>Persist first, email second. The bell is the system of record; email is best effort.</li>
+  <li>De-duplication is a UNIQUE index in the database, not an application check that races itself the moment there
+      is more than one instance. Only the rows that actually landed are emailed.</li>
+  <li>Deactivated accounts are never mailed — that address may have been reassigned.</li>
+</ul>
+
+<h3>audit &amp; settings</h3>
+<ul>
+  <li>The audit log is <b>append-only</b>: no update or delete endpoint exists, and the retention job explicitly
+      spares it. The record of who deleted the data must outlive the data.</li>
+  <li>Audit writes never break a user action — they are fire-and-forget and loudly logged on failure, except where
+      atomicity matters (role changes, approvals, deletes), where they join the transaction.</li>
+  <li>Sensitive keys are <b>dropped entirely, not masked</b>, from audit diffs.</li>
+  <li>Settings accepts only known keys — an open key-value store just ships typos.</li>
+</ul>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">6</span>The refusals</h2>
+<p class="lead">The behaviours most likely to surprise a new administrator. Each is deliberate.</p>
+
+<table>
+  <tr><th>You try to…</th><th>What happens</th><th>Why</th></tr>
+  <tr><td>Delete a department with any history</td><td>409, naming the blocker</td><td>Its people, projects and hours would be orphaned. Deactivate instead.</td></tr>
+  <tr><td>Delete a team that still has members</td><td>409</td><td>They would be silently orphaned with nothing to explain why.</td></tr>
+  <tr><td>Delete a project with logged hours</td><td>Refused — archive instead</td><td>Every hour points at a project; it is the index all reporting reads.</td></tr>
+  <tr><td>Archive the Internal / Non-project project</td><td>Refused</td><td>Hours that belong to no project would have nowhere honest to go.</td></tr>
+  <tr><td>Remove a working hour that has entries</td><td>Retired, not destroyed</td><td>A hard delete would cascade real work away.</td></tr>
+  <tr><td>Delete an employee</td><td>Allowed — the work stays</td><td>The login goes; the hours remain, attributed by name.</td></tr>
+  <tr><td>Cancel an assignment already worked on</td><td>Refused</td><td>Real effort has been recorded against it.</td></tr>
+  <tr><td>Delete an assignment</td><td>No such operation</td><td>Cancellation preserves the trail of who assigned what.</td></tr>
+  <tr><td>Approve your own sheet or assignment</td><td>403</td><td>A lead who is assigned work must not sign it off.</td></tr>
+  <tr><td>Demote the last Management account</td><td>Refused</td><td>Nobody would be left who could undo it.</td></tr>
+  <tr><td>Change a custom field's key after use</td><td>Refused</td><td>Existing entries carry that key. Change the label.</td></tr>
+  <tr><td>Read AI findings as an employee</td><td>403, always</td><td>They are notified, never shown. See §7.</td></tr>
+  <tr><td>Log an hour for a future date</td><td>Refused</td><td>Nothing has happened yet.</td></tr>
+  <tr><td>Log an hour late</td><td><b>Allowed</b>, flagged LATE</td><td>Measure the behaviour; do not prevent the record.</td></tr>
+  <tr><td>Rebuild a grid over logged work</td><td>Columns are retired or re-spanned, never deleted</td><td>Changing the cadence must not cost anybody the hours they recorded.</td></tr>
+  <tr><td>Add someone from another department to a project</td><td>400 <code>PROJECT_DEPARTMENT_MISMATCH</code></td><td>A project belongs to one department; membership cannot cross the isolation boundary.</td></tr>
+  <tr><td>Assign work to a non-member</td><td><b>Allowed</b>, after a confirmation</td><td>It is how people join projects. It is a second decision, so it is asked, not assumed.</td></tr>
+  <tr><td>Review a department that has opted out</td><td>400 <code>DEPARTMENT_OPTED_OUT</code></td><td>The opt-out means "not on request" as well as "not on a schedule".</td></tr>
+  <tr><td>Narrow a review to a project or a person from another department</td><td>400 <code>PROJECT_DEPARTMENT_MISMATCH</code> / <code>USER_DEPARTMENT_MISMATCH</code></td><td>Silently matching nobody would return "0 flagged" — a clean bill of health for a question never actually asked.</td></tr>
+  <tr><td>Set the AI cadence to 0 or 99 hours</td><td>400 <code>INVALID_SETTING_VALUE</code></td><td>A known key is not the same as a sane value.</td></tr>
+</table>
+
+<div class="warn">
+  <span class="label">One trap that is not a refusal</span>
+  <p><code>PATCH /departments/:id</code> is <b>not</b> a partial update. Fields omitted from the payload are blanked.
+  The admin drawer always sends the whole object, so the UI is safe; a hand-rolled API call is not.</p>
+</div>
+
+<h3>What survives what</h3>
+<table>
+  <tr><th>Deleting…</th><th>Destroys</th><th>Preserves</th></tr>
+  <tr><td>An employee</td><td>Refresh tokens, reset OTPs, notifications</td><td>Task days, entries, revisions, assignments, transitions, audit rows, rollups, AI findings — all still named</td></tr>
+  <tr><td>A team</td><td>The team row</td><td>Its members' accounts and every hour they logged</td></tr>
+  <tr><td>An assignment (cancel)</td><td>Nothing</td><td>Every hour logged against it</td></tr>
+  <tr><td>A project module (retire)</td><td>Nothing</td><td>Its assignments and their hours</td></tr>
+</table>
+<p>Twenty relations use <code>SetNull</code> plus a name snapshot to hold this contract; only three cascade, and all
+three are personal credentials.</p>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">7</span>The AI analyser</h2>
+<p class="lead">On the cadence Management sets — two hours by default — per person: do the hours logged plausibly advance the work assigned?</p>
+
+<h3>What it does</h3>
+<p>For each candidate it builds one evidence object — their open assignments, and the hour descriptions they wrote in
+the window — and asks Gemini for a structured verdict: a <b>kind</b> (MISALIGNED, IDLE, LOW_SUBSTANCE, AT_RISK,
+ON_TRACK), a <b>severity</b>, an optional 0–100 alignment score, a finding and a recommendation.</p>
+
+<h3>The four rules it enforces</h3>
+<ol>
+  <li><b>Write the finding before telling anyone.</b> A model's judgement about a person's work is an accusation with
+      consequences. It lands in a durable row — with the evidence it saw and the model that said it — so a disputed
+      finding can be audited against its inputs instead of re-argued from memory.</li>
+  <li><b>The employee is notified, not shown.</b> Leads and Management get the finding. The employee gets a neutral,
+      actionable nudge — never the reasoning, never a score. They can fix the record; they are not handed a machine's
+      opinion of them. <code>GET /ai/insights</code> returns 403 for an employee, enforced in the service as well as
+      the route.</li>
+  <li><b>Evidence or silence.</b> No assignments and nothing logged means nothing to judge. Absence of data is not
+      evidence of idleness, and inventing a finding from it is how a tool like this loses its users' trust in a week.</li>
+  <li><b>It never blocks anything.</b> No timesheet is rejected, no account touched. Every failure path — no key, no
+      quota, bad JSON — degrades to "no insights this run".</li>
+</ol>
+
+<p>ON_TRACK findings are stored too. An insight table that only ever records problems reads as a charge sheet, and
+makes it impossible to tell "the AI checked and was satisfied" from "the AI never looked".</p>
+
+<h3>Per-department opt-out</h3>
+<div class="rule">
+  <span class="label">Enforced in the SELECT, not as a filter on the results</span>
+  <p><code>Department.aiAnalysisEnabled</code> is part of the analyser's <b>candidate query</b>. A department that has
+  switched it off never becomes a candidate, so its assignments and hour descriptions are never read out of the
+  database and nothing about it leaves the network. Analysing everyone and hiding the findings afterwards would mean
+  the work had already left by the time we honoured the setting. That is not an opt-out.</p>
+</div>
+<p>The toggle is Management-only and audited. <code>/ai/status</code> reports which departments have opted out, so
+"nothing flagged" is never ambiguous.</p>
+
+<h3>What leaves the network</h3>
+<p>For an opted-in department only: employee name, code and department; the analysis window; their open assignments
+(title, description, project, module, status, priority, due date, estimate); and the hour descriptions they wrote,
+with the project and assignment each was logged against. No email addresses, no credentials, no salary or HR data —
+the system holds none.</p>
+
+<h3>Cost and reliability</h3>
+<table>
+  <tr><th>Decision</th><th>Basis</th></tr>
+  <tr><td>Model <code>gemini-2.5-flash</code></td><td>Measured 8/8 successful, median 1.2s. <code>gemini-3.5-flash</code> managed 3/8 (five 503s), median 8.7s. A model that fails 60% of the time judges nobody.</td></tr>
+  <tr><td>One call per employee</td><td>Batching people into one call invites cross-attribution. In a system that accuses people, that costs more than tokens.</td></tr>
+  <tr><td>Compact JSON</td><td>Pretty-printing cost 243 of ~1,028 tokens per call — a quarter of every request spent on indentation the model does not read.</td></tr>
+  <tr><td>Skip unchanged evidence</td><td>A fingerprint of the substantive evidence, excluding window timestamps. If today's last finding came from identical evidence, nothing is sent. Bounded to the work date, so everyone is still genuinely assessed at least once a day.</td></tr>
+  <tr><td>Working hours only</td><td>The job wakes hourly on <code>10 9-19 * * 1-5</code>. A 03:00 run cannot find anything a 09:00 run will not; all it produces is a metered call and an IDLE finding about somebody's night.</td></tr>
+  <tr><td><b>Cadence set by Management</b></td><td><code>ai.analysis.intervalHours</code> in Admin › Settings. The job wakes hourly and works only when that many hours have passed, so the change takes effect immediately with no redeploy. Raising it from 2 to 4 halves the calls. The window always matches the cadence, so nothing goes unexamined.</td></tr>
+</table>
+
+<h3>The period review — the on-demand check</h3>
+<p>The scheduled analyser answers <i>"is today going wrong?"</i>. It cannot answer <i>"has this person moved in a fortnight?"</i>, because its window is two hours long. The <b>period review</b> does: Management picks a department and a period (7–30 days) on the AI Insights screen and presses <b>Run AI detection</b>.</p>
+<p>Two further dropdowns — <b>Project</b> and <b>Employee</b> — narrow the question. Both are optional and both default to everything, so the button pressed as it stands is the whole-department review it has always been. A project gathers everyone connected to it three ways: on its member list, holding an assignment on it, or having logged an hour against it in the period. Membership alone would miss whoever is quietly helping out; hours alone would miss the person assigned to it who has not started, who is the more interesting of the two. Naming an employee overrides both — an explicit instruction is not a filter to be second-guessed.</p>
+<p>Each active person in that department is read across the whole period at once — their daily log, their assignments, and crucially the <b>status and completion date of the project modules</b> that work belongs to. That last part is what turns a suspicion into a finding: hours logged against a module the project itself records as finished is a contradiction, not a similarity score.</p>
+<div class="rule">
+  <span class="label">What only a review can catch</span>
+  <p>Three entries — <i>"tested communication module"</i>, <i>"testing schoolmate communication module"</i>, <i>"testing communication module of schoolmate app"</i> — spread across a fortnight. Three different strings, so exact matching finds nothing, and each one read alone is unremarkable. Laid side by side against a module completed on day five, it is a finding: <code>NO_PROGRESS</code>.</p>
+</div>
+<div class="warn">
+  <span class="label">Three guards that keep it honest</span>
+  <p><b>Repetition alone is never a finding.</b> Testing one large module for three weeks is normal engineering. <code>NO_PROGRESS</code> requires restatement <i>plus</i> hard evidence — the module already complete, or effort past its estimate with nothing moving. A completed module alone is not enough either: bug fixes and follow-ups legitimately land after sign-off, so distinct advancing entries after completion read as <code>ON_TRACK</code>.</p>
+  <p><b>Absence of data can never be CRITICAL.</b> This system holds no record of leave, sick days or onboarding, so a quiet fortnight is explained equally well by any of them. The cap is enforced in code, not in the prompt — the prompt already said it and the model returned CRITICAL anyway.</p>
+  <p><b>A project filter must not libel anyone.</b> Narrowed to one project, the model sees that project's share of a person's time and nothing else — so somebody who spent the fortnight heads-down on a different project shows up with an empty log, which reads exactly like idleness. Withholding their other hours is right; withholding the <i>fact</i> of them is what turns a filter into an accusation. The evidence therefore carries one integer, <code>coverage.entriesElsewhere</code>, counting the hours held back. Two identical two-hour Schoolmate logs, one with 0 elsewhere and one with 14, correctly return <code>NO_PROGRESS</code> and <code>ON_TRACK</code>. Severity is capped at INFO in code for anyone who logged nothing here but plenty elsewhere: that is a fact about allocation, not about effort.</p>
+</div>
+<p><b>Nobody is notified by a review.</b> The scheduled analyser alerts leads because it catches things worth correcting the same day; a review is retrospective, so the result goes to the person who asked and no further. Reviews are listed on their own tab, never mixed with the live feed — a fortnight-long judgement must not read as something that happened this afternoon. A project-scoped verdict is stored under its own key, so it sits <i>beside</i> the whole-period one rather than overwriting it; naming an employee does not, because reviewing one person over a period already reviewed is the same question asked again and should refresh the answer, not duplicate it.</p>
+
+<h3>Turning it off</h3>
+<p>Three levers, coarsest first: unset <code>GEMINI_API_KEY</code> (dormant); set <code>AI_ANALYSIS_ENABLED=false</code>
+(configured but off); or switch off individual departments in their admin drawer.</p>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">8</span>Scheduled jobs</h2>
+<p class="lead">Nine jobs, any number of instances, exactly one run each.</p>
+
+<table>
+  <tr><th>Job</th><th>When</th><th>What it does</th></tr>
+  <tr><td>retention-cleanup</td><td>00:05</td><td>Deletes task history older than 180 days, children first, in batches of 1,000. Never touches users, projects, settings or the audit log.</td></tr>
+  <tr><td>productivity-rollup</td><td>00:20</td><td>Rebuilds yesterday and today per person. Idempotent by construction.</td></tr>
+  <tr><td>unsubmitted-check</td><td>09:15, Mon–Fri</td><td>Nudges anyone whose previous day is still a draft.</td></tr>
+  <tr><td>assignment-reminders</td><td>09:30, Mon–Fri</td><td>Due-soon and overdue nudges; overdue rolls up to whoever assigned it.</td></tr>
+  <tr><td>ai-analysis</td><td>Wakes :10 hourly 09–19, Mon–Fri; works on the cadence Management sets (default 2h)</td><td>The work-alignment analyser (§7).</td></tr>
+  <tr><td>auto-approval</td><td>:40 hourly</td><td>Approves sheets submitted more than 24 hours ago that nobody reviewed. Recorded as the system, not a person, and still reopenable.</td></tr>
+  <tr><td>hourly-reminders</td><td>:50 hourly</td><td>Three-way escalation for overdue hours: employee, then their lead, then Management. Skips non-working days and holidays.</td></tr>
+  <tr><td>lead-digest</td><td>13:30 &amp; 18:30, Mon–Fri</td><td>Emails each lead who on their team is behind.</td></tr>
+  <tr><td>management-summary</td><td>19:00, Mon–Fri</td><td>Company-wide daily summary.</td></tr>
+</table>
+<p>All times are <code>CRON_TIMEZONE</code>, default <code>Asia/Kolkata</code>. Every schedule is overridable by
+environment variable, and every expression is validated at boot — an invalid one is refused loudly, because nobody
+notices a silently unscheduled retention job until the database is 400 GB.</p>
+
+<div class="note-box">
+  <span class="label">Why the locking matters</span>
+  <p>node-cron runs inside the application process, and App Service scales out. With three instances every expression
+  fires three times: three reminder emails to each employee, and three concurrent 180-day delete transactions racing
+  on the same rows. Each job takes a lease on a database row via a single atomic conditional update — either it
+  affects one row (we won) or none (someone else holds it). There is no check-then-act window. Leases expire, so an
+  instance killed mid-run does not hold the lock forever.</p>
+</div>
+
+<p>A job that throws is swallowed and logged. An unhandled rejection inside a cron tick would kill the API process
+that people are using to log their hours. Job status and a "run now" button live in Admin › Settings.</p>
+
+<h2><span class="num">9</span>Security posture</h2>
+<table>
+  <tr><th>Area</th><th>Position</th></tr>
+  <tr><td>Passwords</td><td>bcrypt, ≥12 rounds; minimum length plus upper, lower, digit and symbol; the policy is not applied at login</td></tr>
+  <tr><td>Access tokens</td><td>15-minute JWT, algorithm pinned — without pinning, a token claiming <code>alg: none</code> is accepted</td></tr>
+  <tr><td>Refresh tokens</td><td>Opaque, hashed at rest, rotated on use, family-revoked on replay (RFC 6819 §5.2.2.3)</td></tr>
+  <tr><td>In the browser</td><td>The access token lives in a module variable only — never localStorage, so XSS cannot read it. The refresh token is an httpOnly cookie the JS never sees.</td></tr>
+  <tr><td>Every request</td><td>The user is re-read from the database. A stateless token cannot know the account was deactivated ninety seconds ago.</td></tr>
+  <tr><td>Pagination</td><td>Hard page-size ceiling (<code>?pageSize=1000000</code> is a trivial DoS) and a sort-field allow-list — passing <code>sortBy</code> straight through lets a caller sort by <code>passwordHash</code>, which with pagination is a practical oracle for extracting hashes.</td></tr>
+  <tr><td>Errors</td><td>One exit point. Prisma errors are translated, never leaked — a raw Prisma error exposes table and column names. Unexpected errors return only a correlation ID.</td></tr>
+  <tr><td>Uploads</td><td>Avatars verified by magic bytes, not by file extension</td></tr>
+  <tr><td>Audit</td><td>Append-only; sensitive fields dropped from diffs entirely rather than masked</td></tr>
+</table>
+</div>
+
+<!-- ================================================================= -->
+<div class="page">
+<h2><span class="num">10</span>Operations</h2>
+
+<h3>Deploying</h3>
+<p><code>DEPLOYMENT.md</code> at the repo root carries the full procedure; <code>docker-compose.yml</code>,
+<code>azure-setup.sh</code> and <code>azure-deploy.sh</code> are the scaffolding. In production:</p>
+<ul>
+  <li>Use the restricted application user from <code>db-setup.sql</code>, not root.</li>
+  <li>Set <code>TRUST_PROXY</code> to the number of proxies in front of the app. Get it wrong and every audit row
+      records the load balancer's IP, and every IP rate limit becomes one shared bucket for the whole internet.</li>
+  <li>Watch <code>connection_limit</code>: a pool per instance adds up fast against a small MySQL tier.</li>
+  <li>Run migrations with <code>db:deploy</code>. Never <code>db:reset</code> — it drops everything.</li>
+</ul>
+
+<h3>Backups and retention</h3>
+<p>Task history is deleted after <code>TASK_RETENTION_DAYS</code> (180). That is a business policy, so it is
+configurable — but it is a real delete. Confirm your database backup covers the retention horizon before going live,
+because after the sweep the only remaining record of a deleted period is the audit log.</p>
+
+<h3>Testing</h3>
+<table>
+  <tr><th>Suite</th><th>Command</th></tr>
+  <tr><td>Unit</td><td><code>npm run test:unit</code></td></tr>
+  <tr><td>Integration</td><td><code>node --env-file=.env tests/integration/api.smoke.mjs</code></td></tr>
+  <tr><td>Data preservation</td><td><code>node --env-file=.env tests/integration/data-preservation.mjs</code></td></tr>
+</table>
+
+<div class="warn">
+  <span class="label">Run one integration suite per fresh database</span>
+  <p>These suites mutate shared state and are <b>not idempotent</b>. <code>data-preservation.mjs</code> deliberately
+  deletes a seeded employee — that is the point of it — and <code>api.smoke.mjs</code> signs in as that same person.
+  Running them back to back produces failures that look like product bugs and are not. Reset, restart the API, run
+  one suite. Isolated, both are green.</p>
+  <p>Start the API with <code>node --env-file=.env src/server.js</code> for test runs, not <code>npm run dev</code>:
+  the dev script uses <code>--watch</code>, which restarts mid-suite and shows up as <code>ECONNRESET</code>.
+  Both suites honour <code>SMOKE_ADMIN_EMAIL</code> and <code>SMOKE_ADMIN_PASSWORD</code>.</p>
+</div>
+
+<h3>Troubleshooting</h3>
+<table>
+  <tr><th>Symptom</th><th>Cause</th></tr>
+  <tr><td>404 on <code>/api/health</code></td><td>Liveness is <code>/healthz</code>; the API prefix is <code>/api/v1</code></td></tr>
+  <tr><td>API will not start</td><td>Config validation. The first lines of output name the offending variable.</td></tr>
+  <tr><td><code>EPERM</code> on <code>prisma generate</code></td><td>A running Node process holds the query-engine DLL. Stop the server first.</td></tr>
+  <tr><td>Everything returns an empty list</td><td>A scope that could not resolve — it fails closed. Check the user's department.</td></tr>
+  <tr><td>409 on save</td><td>Optimistic concurrency: someone else changed that row. The response carries their version.</td></tr>
+  <tr><td>AI reports 0 assessed</td><td>Check <code>/ai/status</code> for opted-out departments, and whether evidence was unchanged — the run log distinguishes them.</td></tr>
+</table>
+
+<h2><span class="num">11</span>Known gaps</h2>
+<ul>
+  <li><b>Rotate the credentials used during development.</b> The Gemini API key and the Gmail app password were both
+      exposed in working sessions and should be reissued before go-live. Add <code>SMTP_REQUIRE_TLS=true</code>.</li>
+  <li>Reuse of one password across MySQL and the application's admin account should be separated.</li>
+  <li>The AI's <code>aiSummary</code> / <code>aiRiskScore</code> fields on assignments are dormant seams, not features.</li>
+  <li>Notifications are polled (30–60s), not pushed. Fine at this scale; the seam for websockets is clean if needed.</li>
+</ul>
+
+<div class="note-box">
+  <span class="label">Companion document</span>
+  <p><b>Ara-Workbench-Flowcharts.pdf</b> — 24 diagrams, one per module, covering the request lifecycle, access scope,
+  every business module, the logging cadence, the scheduled jobs, and the data-preservation contract drawn out in full.</p>
+</div>
+</div>

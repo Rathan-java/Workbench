@@ -56,7 +56,12 @@ const api = async (path, { method = 'GET', body, token } = {}) => {
   return { status: res.status, ...(res.status === 204 ? {} : await res.json().catch(() => ({}))) };
 };
 
-const admin = await login('admin@ara-workbench.local', 'ChangeMe@Admin123');
+// Overridable for the same reason as the smoke suite: a changed admin password
+// on a dev machine must not look like a data-preservation failure.
+const admin = await login(
+  process.env.SMOKE_ADMIN_EMAIL ?? 'admin@ara-workbench.local',
+  process.env.SMOKE_ADMIN_PASSWORD ?? 'ChangeMe@Admin123',
+);
 if (!admin) {
   console.error('Could not sign in. Reset the DB and reseed first.');
   process.exit(1);

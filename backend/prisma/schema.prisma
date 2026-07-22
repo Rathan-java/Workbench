@@ -228,6 +228,42 @@ enum ModuleStatus {
 }
 
 /// What the AI concluded about a person's two-hour window.
+/// WHO IS ON A PROJECT.
+///
+/// Until this existed, nobody belonged to a project at all: people belonged to
+/// departments and teams, projects belonged to departments, and the only trace
+/// of who worked on what was whoever happened to have logged an hour against it.
+/// That is a record of the past, not a statement of intent — it cannot answer
+/// "who is on Schoolmate?" before the first hour is logged, and it cannot be
+/// wrong in a way anybody can correct.
+///
+/// Membership is CURRENT STATE, not history. It is therefore the one place in
+/// this schema where deleting a person removes the row: the record of the work
+/// they did lives on their task entries and assignments, which are preserved as
+/// always. A membership for an account that no longer exists is not history
+/// worth keeping, it is a stale access list.
+model ProjectMember {
+  id        String @id @default(cuid())
+  projectId String
+  userId    String
+
+  /// Who put them on it, kept for the same reason every other actor is: a
+  /// membership somebody disputes should name the person who added it.
+  addedById String?
+
+  createdAt DateTime @default(now())
+
+  project Project @relation(fields: [projectId], references: [id], onDelete: Cascade)
+  user    User    @relation("ProjectMembership", fields: [userId], references: [id], onDelete: Cascade)
+  addedBy User?   @relation("ProjectMemberAddedBy", fields: [addedById], references: [id], onDelete: SetNull)
+
+  /// One membership per person per project. The DB enforces it, so "add them to
+  /// the project" is safe to call twice — which it will be, from a dialog.
+  @@unique([projectId, userId])
+  @@index([userId])
+  @@map("project_members")
+}
+
 enum InsightKind {
   /// Hours logged do not match what the assignment actually asks for.
   MISALIGNED
@@ -237,6 +273,13 @@ enum InsightKind {
   LOW_SUBSTANCE
   /// Assignment is at risk of its due date.
   AT_RISK
+  /// Plenty written, nothing moved.
+  ///
+  /// The same work described repeatedly in different words across days, while
+  /// the thing it refers to has not advanced — the module is already COMPLETED,
+  /// or the effort has run well past its estimate with the status unchanged.
+  /// Only reachable from a period review: a two-hour window cannot see it.
+  NO_PROGRESS
   /// Work matches the assignment. Recorded so the trail is not only negative.
   ON_TRACK
 }
@@ -270,6 +313,40 @@ model Department {
   requiredSlotsPerDay Int  @default(7)
   /// ISO weekday numbers that count as working days (1 = Mon .. 7 = Sun).
   workingWeekdays     Json @default("[1,2,3,4,5]")
+
+  /// ── THE LOGGING CADENCE ───────────────────────────────────────────────────
+  ///
+  /// How long one block of the task grid covers, and the working day it spans.
+  /// "Hourly" was an assumption baked into the product; it is now a department
+  /// setting, because the honest cadence differs by the kind of work. An editor
+  /// mid-render or an engineer mid-debug cannot describe a completed unit of
+  /// work every sixty minutes, and forcing them to produces "continued task" in
+  /// every row — which is worse than no data, because it looks like data.
+  ///
+  /// These three fields are the INPUT to the grid, not the grid itself: the
+  /// TimeSlot rows remain the source of truth for what is rendered and what
+  /// hours are logged against. Changing these rebuilds those rows (see
+  /// rebuildTimeSlots), which is a deliberate, audited act — never a silent
+  /// side effect of an unrelated edit.
+  slotIntervalMinutes Int  @default(60)
+  /// Minutes from midnight. 600 = 10:00, 1080 = 18:00.
+  dayStartMinute      Int  @default(600)
+  dayEndMinute        Int  @default(1080)
+  /// The unpaid break carved out of that day, if any. Null means no break block.
+  breakStartMinute    Int?
+  breakEndMinute      Int?
+
+  /// Does this department's work get sent to the AI analyser?
+  ///
+  /// Switching this off is a DATA-SHARING decision, not a display preference.
+  /// The analyser's candidate query filters on it, so a disabled department's
+  /// people are never selected, their assignments and hour descriptions are
+  /// never read out of the database, and nothing about them leaves the network.
+  /// It is not "analyse anyway and hide the result".
+  ///
+  /// Defaults to true so existing departments keep working as they do today;
+  /// turning it off is a deliberate act by Management, and it is audited.
+  aiAnalysisEnabled Boolean @default(true)
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -451,6 +528,8 @@ model User {
   settingsChanged       SystemSetting[]
   aiInsights            AiInsight[]               @relation("InsightSubject")
   insightsAcknowledged  AiInsight[]               @relation("InsightAcknowledgedBy")
+  projectMemberships    ProjectMember[]           @relation("ProjectMembership")
+  projectMembersAdded   ProjectMember[]           @relation("ProjectMemberAddedBy")
 
   @@index([departmentId, status])
   @@index([teamId, status])
@@ -492,6 +571,7 @@ model Project {
   entries     TaskEntry[]
   assignments Assignment[]
   modules     ProjectModule[]
+  members     ProjectMember[]
 
   @@unique([departmentId, code])
   @@index([departmentId, status])
@@ -1107,6 +1187,25 @@ model AiInsight {
   /// Which model produced it. When results shift, this is the first question.
   model String @db.VarChar(64)
 
+  /// Did a human ask for this, or did the schedule produce it?
+  ///
+  /// A review is a deliberate act — Management picking a department and a period
+  /// and pressing a button — and it covers days rather than a couple of hours.
+  /// Kept apart from the scheduled findings because the two answer different
+  /// questions and should never be read as one list: "is today going wrong" is
+  /// not the same claim as "this person has not moved in a fortnight".
+  isReview Boolean @default(false)
+
+  /// A fingerprint of the SUBSTANTIVE evidence — the assignments and the hour
+  /// descriptions, deliberately excluding the window timestamps, which change
+  /// every run by definition.
+  ///
+  /// It exists so the next run can ask "has anything actually changed since I
+  /// last judged this person?" and, when the answer is no, say nothing rather
+  /// than pay a model to reach the same conclusion it already reached. The
+  /// finding on record stays the finding on record.
+  evidenceHash String? @db.VarChar(64)
+
   /// Stops the same fact being raised every two hours forever — the same
   /// discipline as the reminder job's dedupe key, enforced by the DATABASE so it
   /// holds across instances.
@@ -1126,6 +1225,7 @@ model AiInsight {
   @@index([userId, createdAt])
   @@index([kind, severity])
   @@index([createdAt])
+  @@index([isReview, createdAt])
   @@map("ai_insights")
 }
 

@@ -1,0 +1,154 @@
+/* Shared print styling for the Ara Workbench PDFs.
+   Rendered by Chrome headless --print-to-pdf; see build.mjs. */
+
+:root {
+  --ink: #14181f;
+  --muted: #5b6472;
+  --faint: #8b95a3;
+  --rule: #dde2e9;
+  --tint: #f5f7fa;
+  --blue: #2563eb;
+  --blue-tint: #eef3ff;
+  --amber: #b45309;
+  --amber-tint: #fef6e7;
+  --green: #15803d;
+  --red: #b91c1c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  font-family: "Segoe UI", -apple-system, system-ui, sans-serif;
+  color: var(--ink);
+  font-size: 10.5pt;
+  line-height: 1.55;
+  margin: 0;
+  -webkit-print-color-adjust: exact;
+  print-color-adjust: exact;
+}
+
+/* ---------- cover ---------- */
+.cover {
+  height: var(--page-h);
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  page-break-after: always;
+  border-left: 10px solid var(--blue);
+  padding: 0 54px;
+}
+.cover .eyebrow {
+  font-size: 9pt; letter-spacing: .22em; text-transform: uppercase;
+  color: var(--blue); font-weight: 700; margin-bottom: 18px;
+}
+.cover h1 { font-size: 34pt; line-height: 1.1; margin: 0 0 10px; font-weight: 700; letter-spacing: -.02em; }
+.cover .sub { font-size: 14pt; color: var(--muted); margin: 0 0 34px; font-weight: 400; }
+.cover dl { display: grid; grid-template-columns: 130px 1fr; gap: 5px 16px; margin: 0; font-size: 9.5pt; }
+.cover dt { color: var(--faint); text-transform: uppercase; letter-spacing: .08em; font-size: 8pt; padding-top: 2px; }
+.cover dd { margin: 0; }
+.cover .note {
+  margin-top: 34px; padding-top: 14px; border-top: 1px solid var(--rule);
+  font-size: 9pt; color: var(--muted); max-width: 30em;
+}
+
+/* ---------- structure ---------- */
+h2 {
+  font-size: 16pt; margin: 0 0 4px; padding-bottom: 7px;
+  border-bottom: 2px solid var(--ink); letter-spacing: -.01em;
+  page-break-after: avoid;
+}
+h2 .num { color: var(--blue); margin-right: 10px; font-variant-numeric: tabular-nums; }
+h3 {
+  font-size: 11.5pt; margin: 20px 0 6px; color: var(--ink);
+  page-break-after: avoid;
+}
+h4 {
+  font-size: 9pt; letter-spacing: .1em; text-transform: uppercase;
+  color: var(--faint); margin: 16px 0 5px; page-break-after: avoid;
+}
+p { margin: 0 0 9px; }
+ul, ol { margin: 0 0 9px; padding-left: 20px; }
+li { margin-bottom: 3px; }
+code {
+  font-family: "Cascadia Mono", Consolas, monospace; font-size: 9pt;
+  background: var(--tint); padding: 1px 4px; border-radius: 3px;
+  border: 1px solid var(--rule);
+}
+a { color: var(--blue); text-decoration: none; }
+
+.page { page-break-before: always; padding: 0 4px; }
+/* The cover already breaks after itself. Without this the first content page
+   breaks again and a blank page appears between them. Marked explicitly rather
+   than with :first-of-type, which matches the COVER (it is the first div). */
+.first { page-break-before: avoid !important; }
+.lead { font-size: 11pt; color: var(--muted); margin: 8px 0 18px; }
+
+/* ---------- tables ---------- */
+table {
+  width: 100%; border-collapse: collapse; margin: 10px 0 14px;
+  font-size: 9pt; page-break-inside: avoid;
+}
+th {
+  text-align: left; background: var(--tint); font-weight: 600;
+  padding: 6px 9px; border-bottom: 1.5px solid var(--rule);
+  font-size: 8pt; text-transform: uppercase; letter-spacing: .06em; color: var(--muted);
+}
+td { padding: 6px 9px; border-bottom: 1px solid var(--rule); vertical-align: top; }
+tbody tr:nth-child(even) { background: #fbfcfd; }
+td code { background: none; border: none; padding: 0; }
+
+/* ---------- callouts ---------- */
+.note-box, .warn, .rule {
+  padding: 10px 14px; margin: 12px 0; border-radius: 0 4px 4px 0;
+  font-size: 9.5pt; page-break-inside: avoid;
+}
+.note-box { background: var(--blue-tint); border-left: 3px solid var(--blue); }
+.warn { background: var(--amber-tint); border-left: 3px solid var(--amber); }
+.rule { background: var(--tint); border-left: 3px solid var(--ink); }
+.note-box .label, .warn .label, .rule .label {
+  display: block; font-size: 7.5pt; letter-spacing: .12em; text-transform: uppercase;
+  font-weight: 700; margin-bottom: 4px;
+}
+.note-box .label { color: var(--blue); }
+.warn .label { color: var(--amber); }
+.rule .label { color: var(--ink); }
+.note-box p:last-child, .warn p:last-child, .rule p:last-child { margin-bottom: 0; }
+
+/* ---------- diagram pages ---------- */
+.dpage {
+  page-break-before: always;
+  height: var(--page-h);
+  /* Belt and braces: the height above is exact, but a caption that wraps to an
+     extra line must not be able to push this box onto a second sheet. */
+  overflow: hidden;
+  display: flex; flex-direction: column;
+}
+.dhead { border-bottom: 2px solid var(--ink); padding-bottom: 6px; margin-bottom: 4px; }
+.dhead h2 { border: none; padding: 0; margin: 0; font-size: 15pt; }
+.dhead .kicker {
+  font-size: 7.5pt; letter-spacing: .16em; text-transform: uppercase;
+  color: var(--blue); font-weight: 700;
+}
+.dcap { font-size: 9pt; color: var(--muted); margin: 6px 0 0; max-width: 62em; }
+.dbody {
+  flex: 1; display: flex; align-items: center; justify-content: center;
+  min-height: 0; padding: 6px 0;
+}
+.mermaid { width: 100%; text-align: center; }
+.mermaid svg { max-width: 100% !important; height: auto !important; max-height: 144mm; /* what is left of the page once the header and footer have taken theirs */ }
+.dfoot {
+  border-top: 1px solid var(--rule); padding-top: 6px; font-size: 8.5pt; color: var(--muted);
+  display: flex; gap: 26px;
+}
+.dfoot b { color: var(--ink); font-weight: 600; }
+.dfoot > div { flex: 1; }
+
+.legend { display: flex; gap: 18px; font-size: 8pt; color: var(--muted); margin-top: 5px; }
+.legend span::before {
+  content: ''; display: inline-block; width: 9px; height: 9px;
+  margin-right: 5px; border-radius: 2px; vertical-align: -1px;
+}
+.legend .s1::before { background: #dbeafe; border: 1px solid #2563eb; }
+.legend .s2::before { background: #fee2e2; border: 1px solid #b91c1c; }
+.legend .s3::before { background: #dcfce7; border: 1px solid #15803d; }
+.legend .s4::before { background: #f1f5f9; border: 1px solid #64748b; }
